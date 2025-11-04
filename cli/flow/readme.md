@@ -26,6 +26,7 @@ Available Commands:
   updateGoVersion  Upgrade Go using the workspace script
   youtubeToSound   Download audio from a YouTube URL into ~/.flow/youtube-sound using yt-dlp
   spotifyPlay      Start playing a Spotify track from a URL or ID
+  openChanges      Open the current monthly changes doc in Cursor
   openLookingBack  Open the current looking-back doc in Cursor
   version          Reports the current version of fgo
 

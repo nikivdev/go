@@ -181,6 +181,51 @@ tasks:
         fi
         echo "Fork remotes configured."
 
+  push:
+    desc: Push changes to your private fork, creating the GitHub repo if needed.
+    silent: false
+    cmds:
+      - |
+        set -euo pipefail
+        set --{{if .CLI_ARGS}} {{.CLI_ARGS}}{{end}}
+        fork_owner="%[3]s"
+        fork_repo="%[4]s"
+        fork_remote="origin"
+        fork_full="${fork_owner}/${fork_repo}"
+        fork_url="git@github.com:${fork_full}.git"
+
+        if ! command -v gh >/dev/null 2>&1; then
+          echo "gh CLI not found in PATH."
+          echo "Install it from https://cli.github.com/ before pushing."
+          exit 1
+        fi
+
+        if git remote get-url "$fork_remote" >/dev/null 2>&1; then
+          current_url="$(git remote get-url "$fork_remote")"
+          if [ "$current_url" != "$fork_url" ]; then
+            echo "Remote '$fork_remote' points to $current_url but expected $fork_url."
+            echo "Update the remote before pushing."
+            exit 1
+          fi
+        else
+          echo "Adding remote '$fork_remote' -> $fork_url"
+          git remote add "$fork_remote" "$fork_url"
+        fi
+
+        if ! gh repo view "$fork_full" >/dev/null 2>&1; then
+          echo "Creating private repository $fork_full via gh..."
+          gh repo create "$fork_full" --private --confirm
+        else
+          echo "Remote repository $fork_full already exists."
+        fi
+
+        if [ $# -eq 0 ]; then
+          set -- --mirror
+        fi
+
+        echo "Pushing with: git push $fork_remote $*"
+        git push "$fork_remote" "$@"
+
   pull:
     desc: Fetch upstream and fast-forward the current branch (or specified branch).
     silent: false
@@ -308,6 +353,10 @@ func main() {
 
 	registerCommand(app, "spotifyPlay", "Start playing a Spotify track from a URL or ID", func(ctx *snap.Context) error {
 		return runSpotifyPlay(ctx)
+	})
+
+	registerCommand(app, "openChanges", "Open the current monthly changes doc in Cursor", func(ctx *snap.Context) error {
+		return runOpenChanges(ctx)
 	})
 
 	registerCommand(app, "openLookingBack", "Open the current looking-back doc in Cursor", func(ctx *snap.Context) error {
@@ -551,6 +600,12 @@ func printCommandHelp(name string, out io.Writer) bool {
 		fmt.Fprintln(out, "Usage:")
 		fmt.Fprintf(out, "  %s spotifyPlay <spotify-url-or-id>\n", commandName)
 		return true
+	case "openChanges":
+		fmt.Fprintln(out, "Open the current month changes doc in Cursor")
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Usage:")
+		fmt.Fprintf(out, "  %s openChanges\n", commandName)
+		return true
 	case "openLookingBack":
 		fmt.Fprintln(out, "Open the current year-month looking-back doc in Cursor")
 		fmt.Fprintln(out)
@@ -593,6 +648,7 @@ func printRootHelp(out io.Writer) {
 	fmt.Fprintln(out, "  updateGoVersion  Upgrade Go using the workspace script")
 	fmt.Fprintln(out, "  youtubeToSound   Download audio from a YouTube URL into ~/.flow/youtube-sound using yt-dlp")
 	fmt.Fprintln(out, "  spotifyPlay      Start playing a Spotify track from a URL or ID")
+	fmt.Fprintln(out, "  openChanges      Open the current monthly changes doc in Cursor")
 	fmt.Fprintln(out, "  openLookingBack  Open the current looking-back doc in Cursor")
 	fmt.Fprintln(out, "  version          Reports the current version of fgo")
 	fmt.Fprintln(out)
@@ -830,6 +886,51 @@ func openInCursor(ctx *snap.Context, path string) error {
 		return fmt.Errorf("open Cursor: %w", err)
 	}
 
+	return nil
+}
+
+func runOpenChanges(ctx *snap.Context) error {
+	if ctx.NArgs() != 0 {
+		fmt.Fprintf(ctx.Stderr(), "Usage: %s openChanges\n", commandName)
+		return fmt.Errorf("expected 0 arguments, got %d", ctx.NArgs())
+	}
+
+	now := time.Now()
+	monthSuffix := strings.ToLower(now.Format("Jan"))
+	fileName := fmt.Sprintf("25-%s.mdx", monthSuffix)
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return reportError(ctx, fmt.Errorf("determine home directory: %w", err))
+	}
+
+	baseDir := filepath.Join(homeDir, "nikiv", "content", "docs", "changes")
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		return reportError(ctx, fmt.Errorf("create directory %s: %w", baseDir, err))
+	}
+
+	targetFile := filepath.Join(baseDir, fileName)
+
+	created := false
+	if _, err := os.Stat(targetFile); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			if err := os.WriteFile(targetFile, []byte{}, 0o644); err != nil {
+				return reportError(ctx, fmt.Errorf("create file %s: %w", targetFile, err))
+			}
+			created = true
+		} else {
+			return reportError(ctx, fmt.Errorf("stat %s: %w", targetFile, err))
+		}
+	}
+
+	if err := openInCursor(ctx, targetFile); err != nil {
+		return reportError(ctx, err)
+	}
+
+	if created {
+		fmt.Fprintf(ctx.Stdout(), "✔️ Created %s\n", targetFile)
+	}
+	fmt.Fprintf(ctx.Stdout(), "✔️ Opened %s in Cursor\n", targetFile)
 	return nil
 }
 
@@ -1701,20 +1802,6 @@ func runPrivateForkRepo(ctx *snap.Context) error {
 		privateRepoName += "-i"
 	}
 
-	exists, err := githubRepoExists(login, privateRepoName)
-	if err != nil {
-		return reportError(ctx, err)
-	}
-
-	if exists {
-		fmt.Fprintf(ctx.Stdout(), "ℹ️ Private repository %s/%s already exists; skipping creation.\n", login, privateRepoName)
-	} else {
-		fmt.Fprintf(ctx.Stdout(), "ℹ️ Creating private repository %s/%s via gh\n", login, privateRepoName)
-		if err := createPrivateRepository(ctx, login, privateRepoName); err != nil {
-			return reportError(ctx, err)
-		}
-	}
-
 	privateSSH := fmt.Sprintf("git@github.com:%s/%s.git", login, privateRepoName)
 	if err := runGitCommandInDir(ctx, targetDir, "remote", "add", "origin", privateSSH); err != nil {
 		return reportError(ctx, fmt.Errorf("git remote add origin %s: %w", privateSSH, err))
@@ -1735,7 +1822,7 @@ func runPrivateForkRepo(ctx *snap.Context) error {
 	} else {
 		fmt.Fprintf(ctx.Stdout(), "ℹ️ Taskfile.yml already present at %s; left unchanged\n", taskfileLocation)
 	}
-	fmt.Fprintln(ctx.Stdout(), "Push with `git push --mirror origin` or select branches to populate the private fork.")
+	fmt.Fprintln(ctx.Stdout(), "Push with `task push` to create the private repo if needed and sync your branches.")
 	return nil
 }
 
