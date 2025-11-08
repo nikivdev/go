@@ -22,6 +22,8 @@ Available Commands:
   killPort         Kill a process by the port it listens on, optionally with fuzzy finder
   privateForkRepo  Clone a repo and create a private fork with upstream remotes
   privateForkRepoAndOpen Clone a repo, create a private fork, and open it in Cursor
+  listWindowsOfApp  List visible windows for a running macOS app
+  shExec           Fuzzy-search shell scripts under ~/config/sh and execute them
   gitFetchUpstream Fetch from upstream (or all remotes) with pruning
   gitSyncFork      Update a local branch from upstream using rebase or merge
   updateGoVersion  Upgrade Go using the workspace script

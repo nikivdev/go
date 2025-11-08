@@ -345,6 +345,14 @@ func main() {
 		return runPrivateForkRepoAndOpen(ctx)
 	})
 
+	registerCommand(app, "listWindowsOfApp", "List visible windows for a running macOS app", func(ctx *snap.Context) error {
+		return runListWindowsOfApp(ctx)
+	})
+
+	registerCommand(app, "shExec", "Fuzzy search shell scripts in ~/config/sh and run them", func(ctx *snap.Context) error {
+		return runShExec(ctx)
+	})
+
 	registerCommand(app, "gitFetchUpstream", "Fetch from upstream (or all remotes) with pruning", func(ctx *snap.Context) error {
 		return runGitFetchUpstream(ctx)
 	})
@@ -585,6 +593,18 @@ func printCommandHelp(name string, out io.Writer) bool {
 		fmt.Fprintln(out, "Usage:")
 		fmt.Fprintf(out, "  %s privateForkRepoAndOpen [github-repo-url]\n", commandName)
 		return true
+	case "listWindowsOfApp":
+		fmt.Fprintln(out, "Fuzzy-select a running macOS app and print its visible window titles")
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Usage:")
+		fmt.Fprintf(out, "  %s listWindowsOfApp\n", commandName)
+		return true
+	case "shExec":
+		fmt.Fprintln(out, "Fuzzy-search executable scripts in ~/config/sh and run them")
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Usage:")
+		fmt.Fprintf(out, "  %s shExec\n", commandName)
+		return true
 	case "gitFetchUpstream":
 		fmt.Fprintln(out, "Fetch upstream (or all remotes) and prune deleted refs")
 		fmt.Fprintln(out)
@@ -666,6 +686,8 @@ func printRootHelp(out io.Writer) {
 	fmt.Fprintln(out, "  killPort         Kill a process by the port it listens on, optionally with fuzzy finder")
 	fmt.Fprintln(out, "  privateForkRepo  Clone a repo and create a private fork with upstream remotes")
 	fmt.Fprintln(out, "  privateForkRepoAndOpen Clone a repo, create a private fork, and open it in Cursor")
+	fmt.Fprintln(out, "  listWindowsOfApp  List visible windows for a running macOS app")
+	fmt.Fprintln(out, "  shExec           Fuzzy-search shell scripts under ~/config/sh and execute them")
 	fmt.Fprintln(out, "  gitFetchUpstream Fetch from upstream (or all remotes) with pruning")
 	fmt.Fprintln(out, "  gitSyncFork      Update a local branch from upstream using rebase or merge")
 	fmt.Fprintln(out, "  updateGoVersion  Upgrade Go using the workspace script")
@@ -1122,6 +1144,281 @@ func openInTablePlus(ctx *snap.Context, databasePath string) error {
 	}
 
 	return nil
+}
+
+func runListWindowsOfApp(ctx *snap.Context) error {
+	if ctx.NArgs() != 0 {
+		fmt.Fprintf(ctx.Stderr(), "Usage: %s listWindowsOfApp\n", commandName)
+		return fmt.Errorf("expected 0 arguments, got %d", ctx.NArgs())
+	}
+
+	apps, err := listRunningApplications()
+	if err != nil {
+		return reportError(ctx, fmt.Errorf("list running applications: %w", err))
+	}
+	if len(apps) == 0 {
+		fmt.Fprintln(ctx.Stdout(), "No foreground applications found.")
+		return nil
+	}
+
+	idx, err := fuzzyfinder.Find(
+		apps,
+		func(i int) string {
+			return apps[i]
+		},
+		fuzzyfinder.WithPromptString("listWindowsOfApp> "),
+	)
+	if err != nil {
+		if errors.Is(err, fuzzyfinder.ErrAbort) {
+			return nil
+		}
+		return reportError(ctx, fmt.Errorf("select application: %w", err))
+	}
+
+	selectedApp := apps[idx]
+	windows, err := listApplicationWindows(selectedApp)
+	if err != nil {
+		return reportError(ctx, fmt.Errorf("list windows for %s: %w", selectedApp, err))
+	}
+
+	if len(windows) == 0 {
+		fmt.Fprintf(ctx.Stdout(), "%s has no visible windows.\n", selectedApp)
+		return nil
+	}
+
+	fmt.Fprintf(ctx.Stdout(), "Windows for %s:\n", selectedApp)
+	for _, title := range windows {
+		fmt.Fprintf(ctx.Stdout(), "  %s\n", title)
+	}
+	return nil
+}
+
+func listRunningApplications() ([]string, error) {
+	script := `tell application "System Events"
+	set appNames to {}
+	repeat with proc in application processes
+		if background only of proc is false then
+			set procName to name of proc
+			if procName is not missing value and procName is not "" then
+				copy procName to end of appNames
+			end if
+		end if
+	end repeat
+end tell
+
+set AppleScript's text item delimiters to "\n"
+return appNames as text`
+
+	cmd := exec.Command("osascript", "-")
+	cmd.Stdin = strings.NewReader(script)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		trimmed := strings.TrimSpace(string(output))
+		if trimmed != "" {
+			return nil, fmt.Errorf("osascript list apps: %s", trimmed)
+		}
+		return nil, fmt.Errorf("osascript list apps: %w", err)
+	}
+
+	trimmed := strings.TrimSpace(string(output))
+	if trimmed == "" {
+		return nil, nil
+	}
+
+	rawNames := strings.Split(trimmed, "\n")
+	seen := make(map[string]struct{}, len(rawNames))
+	var apps []string
+	for _, name := range rawNames {
+		candidate := strings.TrimSpace(name)
+		if candidate == "" {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		apps = append(apps, candidate)
+	}
+
+	sort.Strings(apps)
+	return apps, nil
+}
+
+func listApplicationWindows(appName string) ([]string, error) {
+	script := `on run argv
+	set appName to item 1 of argv
+	tell application "System Events"
+		if not (exists application process appName) then
+			error "Application '" & appName & "' is not running."
+		end if
+		set rawWindowNames to name of every window of application process appName
+	end tell
+
+	set filteredNames to {}
+	repeat with winName in rawWindowNames
+		if winName is not missing value and winName is not "" then
+			copy (winName as text) to end of filteredNames
+		end if
+	end repeat
+
+	if filteredNames is {} then
+		return ""
+	end if
+
+	set AppleScript's text item delimiters to "\n"
+	return filteredNames as text
+end run`
+
+	cmd := exec.Command("osascript", "-", appName)
+	cmd.Stdin = strings.NewReader(script)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		trimmed := strings.TrimSpace(string(output))
+		if trimmed != "" {
+			return nil, fmt.Errorf("osascript list windows: %s", trimmed)
+		}
+		return nil, fmt.Errorf("osascript list windows: %w", err)
+	}
+
+	trimmed := strings.TrimSpace(string(output))
+	if trimmed == "" {
+		return nil, nil
+	}
+
+	rawTitles := strings.Split(trimmed, "\n")
+	var titles []string
+	for _, title := range rawTitles {
+		candidate := strings.TrimSpace(title)
+		if candidate == "" {
+			continue
+		}
+		titles = append(titles, candidate)
+	}
+	return titles, nil
+}
+
+func runShExec(ctx *snap.Context) error {
+	if ctx.NArgs() != 0 {
+		fmt.Fprintf(ctx.Stderr(), "Usage: %s shExec\n", commandName)
+		return fmt.Errorf("expected 0 arguments, got %d", ctx.NArgs())
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return reportError(ctx, fmt.Errorf("determine home directory: %w", err))
+	}
+
+	scriptsDir := filepath.Join(homeDir, "config", "sh")
+	scripts, err := collectShellScripts(scriptsDir)
+	if err != nil {
+		return reportError(ctx, err)
+	}
+
+	if len(scripts) == 0 {
+		fmt.Fprintf(ctx.Stdout(), "No shell scripts found under %s\n", scriptsDir)
+		return nil
+	}
+
+	idx, err := fuzzyfinder.Find(
+		scripts,
+		func(i int) string {
+			return scripts[i].Relative
+		},
+		fuzzyfinder.WithPromptString("shExec> "),
+	)
+	if err != nil {
+		if errors.Is(err, fuzzyfinder.ErrAbort) {
+			return nil
+		}
+		return reportError(ctx, fmt.Errorf("select script: %w", err))
+	}
+
+	selected := scripts[idx]
+	fmt.Fprintf(ctx.Stdout(), "▶️ %s\n", selected.Relative)
+
+	cmd := exec.Command(selected.Absolute)
+	cmd.Dir = filepath.Dir(selected.Absolute)
+	cmd.Stdout = ctx.Stdout()
+	cmd.Stderr = ctx.Stderr()
+	cmd.Stdin = ctx.Stdin()
+	if err := cmd.Run(); err != nil {
+		return reportError(ctx, fmt.Errorf("run %s: %w", selected.Relative, err))
+	}
+
+	fmt.Fprintf(ctx.Stdout(), "✔️ Finished %s\n", selected.Relative)
+	return nil
+}
+
+type scriptCandidate struct {
+	Absolute string
+	Relative string
+}
+
+func collectShellScripts(root string) ([]scriptCandidate, error) {
+	info, err := os.Stat(root)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("scripts directory %s not found", root)
+		}
+		return nil, fmt.Errorf("stat %s: %w", root, err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("%s is not a directory", root)
+	}
+
+	var scripts []scriptCandidate
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if errors.Is(walkErr, fs.ErrPermission) {
+				return nil
+			}
+			return walkErr
+		}
+
+		if d.IsDir() {
+			return nil
+		}
+
+		entryInfo, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if !entryInfo.Mode().IsRegular() {
+			return nil
+		}
+
+		if !isShellScriptFile(d.Name(), entryInfo.Mode()) {
+			return nil
+		}
+
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			rel = path
+		}
+
+		scripts = append(scripts, scriptCandidate{
+			Absolute: path,
+			Relative: rel,
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	sort.Slice(scripts, func(i, j int) bool {
+		return scripts[i].Relative < scripts[j].Relative
+	})
+
+	return scripts, nil
+}
+
+func isShellScriptFile(name string, mode fs.FileMode) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	if ext == ".sh" || ext == ".bash" || ext == ".zsh" {
+		return true
+	}
+	return mode&0o111 != 0
 }
 
 func activeSafariURL() (string, error) {
