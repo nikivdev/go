@@ -21,6 +21,7 @@ Available Commands:
   gitCheckout      Check out a branch from the remote, creating a local tracking branch if needed
   killPort         Kill a process by the port it listens on, optionally with fuzzy finder
   privateForkRepo  Clone a repo and create a private fork with upstream remotes
+  privateForkRepoAndOpen Clone a repo, create a private fork, and open it in Cursor
   gitFetchUpstream Fetch from upstream (or all remotes) with pruning
   gitSyncFork      Update a local branch from upstream using rebase or merge
   updateGoVersion  Upgrade Go using the workspace script
@@ -28,6 +29,7 @@ Available Commands:
   spotifyPlay      Start playing a Spotify track from a URL or ID
   openChanges      Open the current monthly changes doc in Cursor
   openLookingBack  Open the current looking-back doc in Cursor
+  openSqlite       Select a .sqlite file in the current tree and open it in TablePlus
   version          Reports the current version of fgo
 
 Flags:

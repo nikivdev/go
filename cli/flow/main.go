@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -339,6 +341,10 @@ func main() {
 		return runPrivateForkRepo(ctx)
 	})
 
+	registerCommand(app, "privateForkRepoAndOpen", "Private fork a repo and open it in Cursor", func(ctx *snap.Context) error {
+		return runPrivateForkRepoAndOpen(ctx)
+	})
+
 	registerCommand(app, "gitFetchUpstream", "Fetch from upstream (or all remotes) with pruning", func(ctx *snap.Context) error {
 		return runGitFetchUpstream(ctx)
 	})
@@ -361,6 +367,10 @@ func main() {
 
 	registerCommand(app, "openLookingBack", "Open the current looking-back doc in Cursor", func(ctx *snap.Context) error {
 		return runOpenLookingBack(ctx)
+	})
+
+	registerCommand(app, "openSqlite", "Select a .sqlite file in the current tree and open it in TablePlus", func(ctx *snap.Context) error {
+		return runOpenSqlite(ctx)
 	})
 
 	registerCommand(app, "version", "Reports the current version of fgo", func(ctx *snap.Context) error {
@@ -569,6 +579,12 @@ func printCommandHelp(name string, out io.Writer) bool {
 		fmt.Fprintln(out, "Usage:")
 		fmt.Fprintf(out, "  %s privateForkRepo [github-repo-url]\n", commandName)
 		return true
+	case "privateForkRepoAndOpen":
+		fmt.Fprintln(out, "Clone a public repo into ~/fork-i, create a private fork under your account, and open it in Cursor")
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Usage:")
+		fmt.Fprintf(out, "  %s privateForkRepoAndOpen [github-repo-url]\n", commandName)
+		return true
 	case "gitFetchUpstream":
 		fmt.Fprintln(out, "Fetch upstream (or all remotes) and prune deleted refs")
 		fmt.Fprintln(out)
@@ -612,6 +628,12 @@ func printCommandHelp(name string, out io.Writer) bool {
 		fmt.Fprintln(out, "Usage:")
 		fmt.Fprintf(out, "  %s openLookingBack\n", commandName)
 		return true
+	case "openSqlite":
+		fmt.Fprintln(out, "Scan the current directory for .sqlite files and open one in TablePlus")
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Usage:")
+		fmt.Fprintf(out, "  %s openSqlite\n", commandName)
+		return true
 	case "version":
 		fmt.Fprintln(out, "Reports the current version of fgo")
 		fmt.Fprintln(out)
@@ -643,6 +665,7 @@ func printRootHelp(out io.Writer) {
 	fmt.Fprintln(out, "  gitCheckout      Check out a branch from the remote, creating a local tracking branch if needed")
 	fmt.Fprintln(out, "  killPort         Kill a process by the port it listens on, optionally with fuzzy finder")
 	fmt.Fprintln(out, "  privateForkRepo  Clone a repo and create a private fork with upstream remotes")
+	fmt.Fprintln(out, "  privateForkRepoAndOpen Clone a repo, create a private fork, and open it in Cursor")
 	fmt.Fprintln(out, "  gitFetchUpstream Fetch from upstream (or all remotes) with pruning")
 	fmt.Fprintln(out, "  gitSyncFork      Update a local branch from upstream using rebase or merge")
 	fmt.Fprintln(out, "  updateGoVersion  Upgrade Go using the workspace script")
@@ -650,6 +673,7 @@ func printRootHelp(out io.Writer) {
 	fmt.Fprintln(out, "  spotifyPlay      Start playing a Spotify track from a URL or ID")
 	fmt.Fprintln(out, "  openChanges      Open the current monthly changes doc in Cursor")
 	fmt.Fprintln(out, "  openLookingBack  Open the current looking-back doc in Cursor")
+	fmt.Fprintln(out, "  openSqlite       Select a .sqlite file in the current tree and open it in TablePlus")
 	fmt.Fprintln(out, "  version          Reports the current version of fgo")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Flags:")
@@ -977,6 +1001,126 @@ func runOpenLookingBack(ctx *snap.Context) error {
 		fmt.Fprintf(ctx.Stdout(), "✔️ Created %s\n", targetFile)
 	}
 	fmt.Fprintf(ctx.Stdout(), "✔️ Opened %s in Cursor\n", targetFile)
+	return nil
+}
+
+func runOpenSqlite(ctx *snap.Context) error {
+	if ctx.NArgs() != 0 {
+		fmt.Fprintf(ctx.Stderr(), "Usage: %s openSqlite\n", commandName)
+		return fmt.Errorf("expected 0 arguments, got %d", ctx.NArgs())
+	}
+
+	workingDir, err := os.Getwd()
+	if err != nil {
+		return reportError(ctx, fmt.Errorf("determine working directory: %w", err))
+	}
+
+	files, err := findSqliteFiles(workingDir)
+	if err != nil {
+		return reportError(ctx, fmt.Errorf("scan for .sqlite files: %w", err))
+	}
+
+	if len(files) == 0 {
+		fmt.Fprintf(ctx.Stdout(), "No .sqlite files found under %s\n", workingDir)
+		return nil
+	}
+
+	idx, err := fuzzyfinder.Find(
+		files,
+		func(i int) string {
+			return files[i].Relative
+		},
+		fuzzyfinder.WithPromptString("openSqlite> "),
+	)
+	if err != nil {
+		if errors.Is(err, fuzzyfinder.ErrAbort) {
+			return nil
+		}
+		return reportError(ctx, fmt.Errorf("select sqlite file: %w", err))
+	}
+
+	selected := files[idx]
+	if err := openInTablePlus(ctx, selected.Absolute); err != nil {
+		return reportError(ctx, err)
+	}
+
+	fmt.Fprintf(ctx.Stdout(), "✔️ Opened %s in TablePlus\n", selected.Relative)
+	return nil
+}
+
+type sqliteCandidate struct {
+	Absolute string
+	Relative string
+}
+
+func findSqliteFiles(root string) ([]sqliteCandidate, error) {
+	var files []sqliteCandidate
+	skipDirs := map[string]struct{}{
+		".git":         {},
+		".idea":        {},
+		".vscode":      {},
+		"node_modules": {},
+		"vendor":       {},
+	}
+
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if errors.Is(walkErr, fs.ErrPermission) {
+				return nil
+			}
+			return walkErr
+		}
+
+		if d.IsDir() {
+			if path == root {
+				return nil
+			}
+			if _, skip := skipDirs[d.Name()]; skip {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		if !strings.EqualFold(filepath.Ext(d.Name()), ".sqlite") {
+			return nil
+		}
+
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			rel = path
+		}
+
+		files = append(files, sqliteCandidate{
+			Absolute: path,
+			Relative: rel,
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].Relative < files[j].Relative
+	})
+
+	return files, nil
+}
+
+func openInTablePlus(ctx *snap.Context, databasePath string) error {
+	tablePlusApp := "/Applications/TablePlus.app"
+	if _, err := os.Stat(tablePlusApp); err != nil {
+		return fmt.Errorf("TablePlus.app not found at %s: %w", tablePlusApp, err)
+	}
+
+	cmd := exec.Command("open", "-a", tablePlusApp, databasePath)
+	cmd.Stdout = ctx.Stdout()
+	cmd.Stderr = ctx.Stderr()
+	cmd.Stdin = ctx.Stdin()
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("open TablePlus: %w", err)
+	}
+
 	return nil
 }
 
@@ -1737,8 +1881,16 @@ func splitOwnerRepo(path string) (string, string, error) {
 }
 
 func runPrivateForkRepo(ctx *snap.Context) error {
+	return privateForkRepoFlow(ctx, "privateForkRepo", false)
+}
+
+func runPrivateForkRepoAndOpen(ctx *snap.Context) error {
+	return privateForkRepoFlow(ctx, "privateForkRepoAndOpen", true)
+}
+
+func privateForkRepoFlow(ctx *snap.Context, commandLabel string, openAfter bool) error {
 	if ctx.NArgs() > 1 {
-		fmt.Fprintf(ctx.Stderr(), "Usage: %s privateForkRepo [github-repo-url]\n", commandName)
+		fmt.Fprintf(ctx.Stderr(), "Usage: %s %s [github-repo-url]\n", commandName, commandLabel)
 		return fmt.Errorf("expected at most 1 argument, got %d", ctx.NArgs())
 	}
 
@@ -1754,7 +1906,7 @@ func runPrivateForkRepo(ctx *snap.Context) error {
 	}
 
 	if input == "" {
-		fmt.Fprintf(ctx.Stderr(), "Usage: %s privateForkRepo [github-repo-url]\n", commandName)
+		fmt.Fprintf(ctx.Stderr(), "Usage: %s %s [github-repo-url]\n", commandName, commandLabel)
 		return fmt.Errorf("github repository url cannot be empty")
 	}
 
@@ -1781,6 +1933,14 @@ func runPrivateForkRepo(ctx *snap.Context) error {
 
 	if info, err := os.Stat(targetDir); err == nil {
 		if info.IsDir() {
+			if openAfter {
+				fmt.Fprintf(ctx.Stdout(), "ℹ️ Destination %s already exists; skipping clone.\n", targetDir)
+				if err := openInCursor(ctx, targetDir); err != nil {
+					return reportError(ctx, fmt.Errorf("open repository in Cursor: %w", err))
+				}
+				fmt.Fprintf(ctx.Stdout(), "✔️ Opened %s in Cursor\n", targetDir)
+				return nil
+			}
 			return reportError(ctx, fmt.Errorf("destination %s already exists", targetDir))
 		}
 		return reportError(ctx, fmt.Errorf("destination %s exists and is not a directory", targetDir))
@@ -1822,6 +1982,14 @@ func runPrivateForkRepo(ctx *snap.Context) error {
 	} else {
 		fmt.Fprintf(ctx.Stdout(), "ℹ️ Taskfile.yml already present at %s; left unchanged\n", taskfileLocation)
 	}
+
+	if openAfter {
+		if err := openInCursor(ctx, targetDir); err != nil {
+			return reportError(ctx, fmt.Errorf("open repository in Cursor: %w", err))
+		}
+		fmt.Fprintf(ctx.Stdout(), "✔️ Opened %s in Cursor\n", targetDir)
+	}
+
 	fmt.Fprintln(ctx.Stdout(), "Push with `task push` to create the private repo if needed and sync your branches.")
 	return nil
 }
