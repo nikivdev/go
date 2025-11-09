@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -26,18 +27,21 @@ import (
 	openai "github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
 	"github.com/openai/openai-go/shared"
+	_ "modernc.org/sqlite"
 )
 
 const (
-	flowVersion        = "1.0.0"
-	upgradeScriptPath  = "/Users/nikiv/src/config/sh/upgrade-go-version.sh"
-	taskfilePath       = "Taskfile.yml"
-	defaultCommandName = "fgo"
-	defaultSummary     = "fgo is CLI to do things fast"
-	flowInstallDir     = "~/bin"
-	commitModelName    = "gpt-5-nano"
-	maxCommitDiffRunes = 12000
-	openAIAPIKeyEnv    = "OPENAI_API_KEY"
+	flowVersion              = "1.0.0"
+	upgradeScriptPath        = "/Users/nikiv/src/config/sh/upgrade-go-version.sh"
+	taskfilePath             = "Taskfile.yml"
+	defaultCommandName       = "fgo"
+	defaultSummary           = "fgo is CLI to do things fast"
+	flowInstallDir           = "~/bin"
+	commitModelName          = "gpt-5-nano"
+	maxCommitDiffRunes       = 12000
+	openAIAPIKeyEnv          = "OPENAI_API_KEY"
+	windowFocusDBEnv         = "FLOW_WINDOW_FOCUS_DB"
+	defaultWindowFocusDBPath = "/Users/nikiv/Library/Application Support/1focus/window-focus.db"
 )
 
 var (
@@ -279,6 +283,32 @@ type commandInfo struct {
 	description string
 }
 
+type windowFocusEntry struct {
+	ID            int64
+	WindowTitle   string
+	WorkspaceName string
+	WorkspacePath string
+	ActiveFile    string
+	FocusedAt     int64
+}
+
+func (e *windowFocusEntry) cursorOpenPath() string {
+	if e == nil {
+		return ""
+	}
+
+	active := strings.TrimSpace(e.ActiveFile)
+	if active != "" && filepath.IsAbs(active) {
+		return active
+	}
+
+	if trimmed := strings.TrimSpace(e.WorkspacePath); trimmed != "" {
+		return trimmed
+	}
+
+	return ""
+}
+
 var commandCatalog []commandInfo
 
 func main() {
@@ -379,6 +409,10 @@ func main() {
 
 	registerCommand(app, "openSqlite", "Select a .sqlite file in the current tree and open it in TablePlus", func(ctx *snap.Context) error {
 		return runOpenSqlite(ctx)
+	})
+
+	registerCommand(app, "focusCursorWindow", "Focus the latest Cursor window recorded in window_focus", func(ctx *snap.Context) error {
+		return runFocusCursorWindow(ctx)
 	})
 
 	registerCommand(app, "version", "Reports the current version of fgo", func(ctx *snap.Context) error {
@@ -654,6 +688,12 @@ func printCommandHelp(name string, out io.Writer) bool {
 		fmt.Fprintln(out, "Usage:")
 		fmt.Fprintf(out, "  %s openSqlite\n", commandName)
 		return true
+	case "focusCursorWindow":
+		fmt.Fprintln(out, "Focus the most recent Cursor window logged without a trailing '.' workspace name, falling back to opening its folder")
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Usage:")
+		fmt.Fprintf(out, "  %s focusCursorWindow\n", commandName)
+		return true
 	case "version":
 		fmt.Fprintln(out, "Reports the current version of fgo")
 		fmt.Fprintln(out)
@@ -696,12 +736,96 @@ func printRootHelp(out io.Writer) {
 	fmt.Fprintln(out, "  openChanges      Open the current monthly changes doc in Cursor")
 	fmt.Fprintln(out, "  openLookingBack  Open the current looking-back doc in Cursor")
 	fmt.Fprintln(out, "  openSqlite       Select a .sqlite file in the current tree and open it in TablePlus")
+	fmt.Fprintln(out, "  focusCursorWindow Focus the latest Cursor window logged without a trailing '.' workspace name")
 	fmt.Fprintln(out, "  version          Reports the current version of fgo")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Flags:")
 	fmt.Fprintf(out, "  -h, --help   help for %s\n", commandName)
 	fmt.Fprintln(out)
 	fmt.Fprintf(out, "Use \"%s [command] --help\" for more information about a command.\n", commandName)
+}
+
+func windowFocusDatabasePath() (string, error) {
+	if override, ok := lookupNonEmptyEnv(windowFocusDBEnv); ok {
+		return filepath.Clean(override), nil
+	}
+	return defaultWindowFocusDBPath, nil
+}
+
+func fetchLatestWindowFocusEntry() (*windowFocusEntry, error) {
+	dbPath, err := windowFocusDatabasePath()
+	if err != nil {
+		return nil, fmt.Errorf("determine window focus database path: %w", err)
+	}
+	if dbPath == "" {
+		return nil, fmt.Errorf("window focus database path is empty")
+	}
+
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil, fmt.Errorf("access %s: %w", dbPath, err)
+	}
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("open window focus database: %w", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+
+	const query = `
+SELECT
+	id,
+	window_title,
+	workspace_name,
+	workspace_path,
+	active_file,
+	focused_at
+FROM window_focus
+WHERE
+	workspace_name IS NOT NULL
+	AND workspace_name = rtrim(workspace_name, '.')
+ORDER BY focused_at DESC
+LIMIT 1;
+`
+
+	var (
+		entry         windowFocusEntry
+		windowTitle   sql.NullString
+		workspaceName sql.NullString
+		workspacePath sql.NullString
+		activeFile    sql.NullString
+	)
+
+	err = db.QueryRow(query).Scan(
+		&entry.ID,
+		&windowTitle,
+		&workspaceName,
+		&workspacePath,
+		&activeFile,
+		&entry.FocusedAt,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("query window_focus: %w", err)
+	}
+
+	if windowTitle.Valid {
+		entry.WindowTitle = strings.TrimSpace(windowTitle.String)
+	}
+	if workspaceName.Valid {
+		entry.WorkspaceName = strings.TrimSpace(workspaceName.String)
+	}
+	if workspacePath.Valid {
+		entry.WorkspacePath = strings.TrimSpace(workspacePath.String)
+	}
+	if activeFile.Valid {
+		entry.ActiveFile = strings.TrimSpace(activeFile.String)
+	}
+
+	return &entry, nil
 }
 
 func runBranchFromClipboard(ctx *snap.Context) error {
@@ -1070,6 +1194,69 @@ func runOpenSqlite(ctx *snap.Context) error {
 	return nil
 }
 
+func runFocusCursorWindow(ctx *snap.Context) error {
+	if ctx.NArgs() != 0 {
+		fmt.Fprintf(ctx.Stderr(), "Usage: %s focusCursorWindow\n", commandName)
+		return fmt.Errorf("expected 0 arguments, got %d", ctx.NArgs())
+	}
+
+	entry, err := fetchLatestWindowFocusEntry()
+	if err != nil {
+		return reportError(ctx, fmt.Errorf("load latest window_focus entry: %w", err))
+	}
+	if entry == nil {
+		fmt.Fprintln(ctx.Stdout(), "No window_focus entry without a trailing '.' workspace name was found.")
+		return nil
+	}
+
+	description := entry.WindowTitle
+	if description == "" {
+		description = entry.WorkspaceName
+	}
+	fmt.Fprintf(ctx.Stdout(), "Latest entry #%d: %s\n", entry.ID, description)
+
+	var (
+		focused bool
+		reason  string
+	)
+
+	if entry.WindowTitle != "" {
+		focused, reason, err = focusCursorWindowByTitle(entry.WindowTitle)
+		if err != nil {
+			return reportError(ctx, fmt.Errorf("focus Cursor window %q: %w", entry.WindowTitle, err))
+		}
+	} else {
+		reason = "entry has no window title"
+	}
+
+	if focused {
+		fmt.Fprintf(ctx.Stdout(), "✔️ Focused Cursor window %q\n", entry.WindowTitle)
+		return nil
+	}
+
+	openPath := entry.cursorOpenPath()
+	if openPath == "" {
+		if reason != "" {
+			fmt.Fprintf(ctx.Stdout(), "ℹ️ %s\n", reason)
+		}
+		fmt.Fprintln(ctx.Stdout(), "No workspace path available to open in Cursor.")
+		return nil
+	}
+
+	if reason != "" {
+		fmt.Fprintf(ctx.Stdout(), "ℹ️ %s; opening %s in Cursor instead.\n", reason, openPath)
+	} else {
+		fmt.Fprintf(ctx.Stdout(), "ℹ️ Opening %s in Cursor.\n", openPath)
+	}
+
+	if err := openInCursor(ctx, openPath); err != nil {
+		return reportError(ctx, fmt.Errorf("open %s in Cursor: %w", openPath, err))
+	}
+
+	fmt.Fprintf(ctx.Stdout(), "✔️ Opened %s in Cursor\n", openPath)
+	return nil
+}
+
 type sqliteCandidate struct {
 	Absolute string
 	Relative string
@@ -1295,6 +1482,136 @@ end run`
 		titles = append(titles, candidate)
 	}
 	return titles, nil
+}
+
+func focusCursorWindowByTitle(title string) (bool, string, error) {
+	trimmed := strings.TrimSpace(title)
+	if trimmed == "" {
+		return false, "", fmt.Errorf("window title cannot be empty")
+	}
+
+	if _, err := exec.LookPath("osascript"); err != nil {
+		return false, "", fmt.Errorf("osascript not found in PATH: %w", err)
+	}
+
+	script := fmt.Sprintf(`set targetTitle to "%s"
+set matched to false
+
+tell application "System Events"
+	if not (exists application process "Cursor") then
+		return "NOT_RUNNING"
+	end if
+
+	tell application process "Cursor"
+		repeat with w in windows
+			set winName to ""
+			try
+				set winName to name of w
+			end try
+
+			if winName is targetTitle then
+				set matched to true
+				try
+					set frontmost to true
+				end try
+				try
+					set value of attribute "AXMain" of w to true
+				end try
+				try
+					perform action "AXRaise" of w
+				end try
+				exit repeat
+			end if
+		end repeat
+	end tell
+end tell
+
+if matched then
+	tell application "Cursor" to activate
+	return "FOCUSED"
+end if
+
+return "NOT_FOUND"`, escapeAppleScriptString(trimmed))
+
+	cmd := exec.Command("osascript", "-e", script)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		trimmedErr := strings.TrimSpace(string(output))
+		if trimmedErr != "" {
+			return false, "", fmt.Errorf("osascript focus Cursor: %s", trimmedErr)
+		}
+		return false, "", fmt.Errorf("osascript focus Cursor: %w", err)
+	}
+
+	result := strings.TrimSpace(string(output))
+	switch result {
+	case "FOCUSED":
+		currentTitle, err := cursorFrontWindowTitle()
+		if err != nil {
+			return false, "unable to verify Cursor window state", nil
+		}
+		if normalizeWindowTitle(currentTitle) == normalizeWindowTitle(trimmed) {
+			return true, "", nil
+		}
+		if currentTitle == "" {
+			return false, "Cursor reports no front window after focusing", nil
+		}
+		return false, fmt.Sprintf("Cursor focused %q instead", currentTitle), nil
+	case "NOT_RUNNING":
+		return false, "Cursor is not running", nil
+	case "NOT_FOUND":
+		return false, fmt.Sprintf("no Cursor window titled %q was found", trimmed), nil
+	default:
+		if result == "" {
+			return false, "", fmt.Errorf("focus Cursor window returned empty response")
+		}
+		return false, "", fmt.Errorf("unexpected osascript response: %s", result)
+	}
+}
+
+func normalizeWindowTitle(title string) string {
+	if title == "" {
+		return ""
+	}
+	return strings.TrimSpace(title)
+}
+
+func cursorFrontWindowTitle() (string, error) {
+	script := `tell application "System Events"
+	if not (exists application process "Cursor") then
+		return ""
+	end if
+
+	tell application process "Cursor"
+		repeat with w in windows
+			try
+				if value of attribute "AXMain" of w is true then
+					return name of w
+				end if
+			end try
+		end repeat
+
+		if (count of windows) > 0 then
+			try
+				return name of window 1
+			end try
+		end if
+	end tell
+end tell
+
+return ""`
+
+	cmd := exec.Command("osascript", "-e", script)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		trimmed := strings.TrimSpace(string(output))
+		if trimmed != "" {
+			return "", fmt.Errorf("osascript front window: %s", trimmed)
+		}
+		return "", fmt.Errorf("osascript front window: %w", err)
+	}
+
+	return strings.TrimSpace(string(output)), nil
 }
 
 func runShExec(ctx *snap.Context) error {

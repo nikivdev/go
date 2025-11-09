@@ -32,6 +32,7 @@ Available Commands:
   openChanges      Open the current monthly changes doc in Cursor
   openLookingBack  Open the current looking-back doc in Cursor
   openSqlite       Select a .sqlite file in the current tree and open it in TablePlus
+  focusCursorWindow Focus the latest Cursor window logged without a trailing '.' workspace name
   version          Reports the current version of fgo
 
 Flags:
