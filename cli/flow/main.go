@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math/rand"
 	"net/url"
 	"os"
 	"os/exec"
@@ -359,12 +360,20 @@ func main() {
 		return runCloneAndOpen(ctx)
 	})
 
+	registerCommand(app, "clonePR", "Clone a GitHub pull request into ~/pr/<repo>-pr<num>", func(ctx *snap.Context) error {
+		return runClonePR(ctx)
+	})
+
 	registerCommand(app, "gitCheckout", "Check out a branch from the remote, creating a local tracking branch if needed", func(ctx *snap.Context) error {
 		return runGitCheckout(ctx)
 	})
 
 	registerCommand(app, "killPort", "Kill a process by the port it listens on, optionally with fuzzy finder", func(ctx *snap.Context) error {
 		return runKillPort(ctx)
+	})
+
+	registerCommand(app, "try", "Create a numbered scratch directory in ~/t and open a shell there", func(ctx *snap.Context) error {
+		return runTry(ctx)
 	})
 
 	registerCommand(app, "privateForkRepo", "Create a private fork in ~/fork-i/<owner>/<repo> with upstream remotes", func(ctx *snap.Context) error {
@@ -399,8 +408,20 @@ func main() {
 		return runSpotifyPlay(ctx)
 	})
 
+	registerCommand(app, "openDoc", "Open a doc type by key (metrics, changes, log, looking-back)", func(ctx *snap.Context) error {
+		return runOpenDoc(ctx)
+	})
+
+	registerCommand(app, "openLog", "Open the current monthly log doc in Cursor", func(ctx *snap.Context) error {
+		return runOpenLog(ctx)
+	})
+
 	registerCommand(app, "openChanges", "Open the current monthly changes doc in Cursor", func(ctx *snap.Context) error {
 		return runOpenChanges(ctx)
+	})
+
+	registerCommand(app, "openMetrics", "Open the current monthly metrics doc in Cursor", func(ctx *snap.Context) error {
+		return runOpenMetrics(ctx)
 	})
 
 	registerCommand(app, "openLookingBack", "Open the current looking-back doc in Cursor", func(ctx *snap.Context) error {
@@ -603,6 +624,12 @@ func printCommandHelp(name string, out io.Writer) bool {
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, "Without an argument the command uses the frontmost Safari tab URL.")
 		return true
+	case "clonePR":
+		fmt.Fprintln(out, "Clone a GitHub pull request into ~/pr/<repo>-pr<num> and check it out")
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Usage:")
+		fmt.Fprintf(out, "  %s clonePR <github-pr-url-or-owner/repo#num>\n", commandName)
+		return true
 	case "gitCheckout":
 		fmt.Fprintln(out, "Check out a branch from the remote, creating a local tracking branch if needed")
 		fmt.Fprintln(out)
@@ -614,6 +641,12 @@ func printCommandHelp(name string, out io.Writer) bool {
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, "Usage:")
 		fmt.Fprintf(out, "  %s killPort [port]\n", commandName)
+		return true
+	case "try":
+		fmt.Fprintln(out, "Create a numbered scratch directory in ~/t and open a shell there")
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Usage:")
+		fmt.Fprintf(out, "  %s try\n", commandName)
 		return true
 	case "privateForkRepo":
 		fmt.Fprintln(out, "Clone a public repo into ~/fork-i and create a private fork under your account")
@@ -670,11 +703,31 @@ func printCommandHelp(name string, out io.Writer) bool {
 		fmt.Fprintln(out, "Usage:")
 		fmt.Fprintf(out, "  %s spotifyPlay <spotify-url-or-id>\n", commandName)
 		return true
+	case "openDoc":
+		fmt.Fprintln(out, "Open a doc by type key (e.g., metrics, changes, log, looking-back)")
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Usage:")
+		fmt.Fprintf(out, "  %s openDoc <doc-type>\n", commandName)
+		fmt.Fprintln(out)
+		fmt.Fprintf(out, "Available doc types: %s\n", strings.Join(availableDocKeys(), ", "))
+		return true
+	case "openLog":
+		fmt.Fprintln(out, "Open the current month log doc in Cursor")
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Usage:")
+		fmt.Fprintf(out, "  %s openLog\n", commandName)
+		return true
 	case "openChanges":
 		fmt.Fprintln(out, "Open the current month changes doc in Cursor")
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, "Usage:")
 		fmt.Fprintf(out, "  %s openChanges\n", commandName)
+		return true
+	case "openMetrics":
+		fmt.Fprintln(out, "Open the current month metrics doc in Cursor")
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Usage:")
+		fmt.Fprintf(out, "  %s openMetrics\n", commandName)
 		return true
 	case "openLookingBack":
 		fmt.Fprintln(out, "Open the current year-month looking-back doc in Cursor")
@@ -722,8 +775,10 @@ func printRootHelp(out io.Writer) {
 	fmt.Fprintln(out, "  branchFromClipboard Create a git branch from the clipboard name")
 	fmt.Fprintln(out, "  clone            Clone a GitHub repository into ~/gh/<owner>/<repo>")
 	fmt.Fprintln(out, "  cloneAndOpen     Clone a GitHub repository and open it in Cursor (Safari tab optional)")
+	fmt.Fprintln(out, "  clonePR          Clone a GitHub pull request into ~/pr/<repo>-pr<num> and check it out")
 	fmt.Fprintln(out, "  gitCheckout      Check out a branch from the remote, creating a local tracking branch if needed")
 	fmt.Fprintln(out, "  killPort         Kill a process by the port it listens on, optionally with fuzzy finder")
+	fmt.Fprintln(out, "  try              Create a numbered scratch directory in ~/t and open a shell there")
 	fmt.Fprintln(out, "  privateForkRepo  Clone a repo and create a private fork with upstream remotes")
 	fmt.Fprintln(out, "  privateForkRepoAndOpen Clone a repo, create a private fork, and open it in Cursor")
 	fmt.Fprintln(out, "  listWindowsOfApp  List visible windows for a running macOS app")
@@ -733,7 +788,10 @@ func printRootHelp(out io.Writer) {
 	fmt.Fprintln(out, "  updateGoVersion  Upgrade Go using the workspace script")
 	fmt.Fprintln(out, "  youtubeToSound   Download audio from a YouTube URL into ~/.flow/youtube-sound using yt-dlp")
 	fmt.Fprintln(out, "  spotifyPlay      Start playing a Spotify track from a URL or ID")
+	fmt.Fprintln(out, "  openDoc          Open a doc by type key (metrics, changes, log, looking-back)")
+	fmt.Fprintln(out, "  openLog          Open the current monthly log doc in Cursor")
 	fmt.Fprintln(out, "  openChanges      Open the current monthly changes doc in Cursor")
+	fmt.Fprintln(out, "  openMetrics      Open the current monthly metrics doc in Cursor")
 	fmt.Fprintln(out, "  openLookingBack  Open the current looking-back doc in Cursor")
 	fmt.Fprintln(out, "  openSqlite       Select a .sqlite file in the current tree and open it in TablePlus")
 	fmt.Fprintln(out, "  focusCursorWindow Focus the latest Cursor window logged without a trailing '.' workspace name")
@@ -1003,6 +1061,103 @@ func runCloneAndOpen(ctx *snap.Context) error {
 	return nil
 }
 
+func runClonePR(ctx *snap.Context) error {
+	if ctx.NArgs() != 1 {
+		fmt.Fprintf(ctx.Stderr(), "Usage: %s clonePR <github-pr-url-or-owner/repo#num>\n", commandName)
+		return fmt.Errorf("expected 1 argument, got %d", ctx.NArgs())
+	}
+
+	ref := strings.TrimSpace(ctx.Arg(0))
+	if ref == "" {
+		fmt.Fprintf(ctx.Stderr(), "Usage: %s clonePR <github-pr-url-or-owner/repo#num>\n", commandName)
+		return fmt.Errorf("pull request reference cannot be empty")
+	}
+
+	owner, repo, prNumber, err := parsePullRequestRef(ref)
+	if err != nil {
+		return err
+	}
+
+	if _, err := exec.LookPath("gh"); err != nil {
+		return fmt.Errorf("gh CLI not found in PATH: %w", err)
+	}
+
+	repoFull := fmt.Sprintf("%s/%s", owner, repo)
+	dest, err := pullRequestCloneDestination(repo, prNumber)
+	if err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return fmt.Errorf("create destination parent: %w", err)
+	}
+
+	if info, err := os.Stat(dest); err == nil {
+		if info.IsDir() {
+			return fmt.Errorf("destination %s already exists", dest)
+		}
+		return fmt.Errorf("destination %s exists and is not a directory", dest)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("check destination %s: %w", dest, err)
+	}
+
+	fmt.Fprintf(ctx.Stdout(), "Cloning %s PR #%d into %s\n", repoFull, prNumber, dest)
+
+	cloneCmd := exec.Command("gh", "repo", "clone", repoFull, dest)
+	cloneCmd.Stdout = ctx.Stdout()
+	cloneCmd.Stderr = ctx.Stderr()
+	cloneCmd.Stdin = ctx.Stdin()
+	if err := cloneCmd.Run(); err != nil {
+		return fmt.Errorf("gh repo clone %s: %w", repoFull, err)
+	}
+
+	checkoutCmd := exec.Command("gh", "pr", "checkout", strconv.Itoa(prNumber))
+	checkoutCmd.Dir = dest
+	checkoutCmd.Stdout = ctx.Stdout()
+	checkoutCmd.Stderr = ctx.Stderr()
+	checkoutCmd.Stdin = ctx.Stdin()
+	if err := checkoutCmd.Run(); err != nil {
+		return fmt.Errorf("gh pr checkout %d: %w", prNumber, err)
+	}
+
+	fmt.Fprintf(ctx.Stdout(), "✔️ Ready at %s\n", dest)
+	return nil
+}
+
+func runTry(ctx *snap.Context) error {
+	if ctx.NArgs() != 0 {
+		fmt.Fprintf(ctx.Stderr(), "Usage: %s try\n", commandName)
+		return fmt.Errorf("expected 0 arguments, got %d", ctx.NArgs())
+	}
+
+	base, err := tryBaseDir()
+	if err != nil {
+		return err
+	}
+
+	dir, err := createRandomTryDir(base)
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(ctx.Stdout(), "Created %s\n", dir)
+
+	shell := detectShell()
+	fmt.Fprintf(ctx.Stdout(), "Launching shell in %s (exit to return)\n\n", dir)
+
+	cmd := exec.Command(shell)
+	cmd.Dir = dir
+	cmd.Stdout = ctx.Stdout()
+	cmd.Stderr = ctx.Stderr()
+	cmd.Stdin = ctx.Stdin()
+	cmd.Env = os.Environ()
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("start shell in %s: %w", dir, err)
+	}
+
+	return nil
+}
+
 func cloneRepository(ctx *snap.Context, input string) (string, error) {
 	owner, repo, cloneURL, err := parseGitHubCloneInfo(input)
 	if err != nil {
@@ -1042,6 +1197,95 @@ func cloneRepository(ctx *snap.Context, input string) (string, error) {
 	return targetDir, nil
 }
 
+func parsePullRequestRef(input string) (string, string, int, error) {
+	candidate := strings.TrimSpace(strings.TrimSuffix(input, "/"))
+	if candidate == "" {
+		return "", "", 0, fmt.Errorf("pull request reference cannot be empty")
+	}
+
+	if strings.HasPrefix(candidate, "http://") || strings.HasPrefix(candidate, "https://") {
+		u, err := url.Parse(candidate)
+		if err != nil {
+			return "", "", 0, fmt.Errorf("parse url %q: %w", input, err)
+		}
+		if !strings.EqualFold(u.Host, "github.com") {
+			return "", "", 0, fmt.Errorf("expected github.com host, got %s", u.Host)
+		}
+		segments := strings.Split(strings.Trim(u.Path, "/"), "/")
+		if len(segments) < 4 {
+			return "", "", 0, fmt.Errorf("expected GitHub pull request URL, got %q", input)
+		}
+		owner := segments[0]
+		repo := strings.TrimSuffix(segments[1], ".git")
+		number := 0
+		for i := 2; i < len(segments); i++ {
+			if segments[i] == "pull" || segments[i] == "pulls" {
+				if i+1 < len(segments) {
+					if n, err := strconv.Atoi(strings.TrimSpace(segments[i+1])); err == nil && n > 0 {
+						number = n
+						break
+					}
+				}
+			}
+		}
+		if owner == "" || repo == "" || number == 0 {
+			return "", "", 0, fmt.Errorf("unable to parse pull request from %q", input)
+		}
+		return owner, repo, number, nil
+	}
+
+	if hash := strings.Index(candidate, "#"); hash > 0 {
+		repoPart := strings.TrimSpace(candidate[:hash])
+		numberPart := strings.TrimSpace(candidate[hash+1:])
+		owner, repo, err := splitOwnerRepo(repoPart)
+		if err != nil {
+			return "", "", 0, err
+		}
+		number, err := strconv.Atoi(numberPart)
+		if err != nil || number <= 0 {
+			return "", "", 0, fmt.Errorf("invalid pull request number %q", numberPart)
+		}
+		return owner, repo, number, nil
+	}
+
+	if strings.Contains(candidate, "/pull/") || strings.Contains(candidate, "/pulls/") {
+		parts := strings.Split(candidate, "/")
+		if len(parts) >= 4 {
+			owner := parts[0]
+			repo := strings.TrimSuffix(parts[1], ".git")
+			for i := 2; i < len(parts); i++ {
+				if parts[i] == "pull" || parts[i] == "pulls" {
+					if i+1 < len(parts) {
+						if number, err := strconv.Atoi(strings.TrimSpace(parts[i+1])); err == nil && number > 0 {
+							return owner, repo, number, nil
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return "", "", 0, fmt.Errorf("expected GitHub PR URL or owner/repo#num, got %q", input)
+}
+
+func pullRequestCloneDestination(repo string, prNumber int) (string, error) {
+	if prNumber <= 0 {
+		return "", fmt.Errorf("invalid pull request number %d", prNumber)
+	}
+
+	repoName := strings.TrimSuffix(filepath.Base(repo), ".git")
+	if strings.TrimSpace(repoName) == "" {
+		return "", fmt.Errorf("invalid repository name %q", repo)
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("determine home directory: %w", err)
+	}
+
+	return filepath.Join(homeDir, "pr", fmt.Sprintf("%s-pr%d", repoName, prNumber)), nil
+}
+
 func openInCursor(ctx *snap.Context, path string) error {
 	cursorApp := "/Applications/Cursor.app"
 	if _, err := os.Stat(cursorApp); err != nil {
@@ -1059,22 +1303,126 @@ func openInCursor(ctx *snap.Context, path string) error {
 	return nil
 }
 
-func runOpenChanges(ctx *snap.Context) error {
-	if ctx.NArgs() != 0 {
-		fmt.Fprintf(ctx.Stderr(), "Usage: %s openChanges\n", commandName)
-		return fmt.Errorf("expected 0 arguments, got %d", ctx.NArgs())
+func tryBaseDir() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("determine home directory: %w", err)
+	}
+	return filepath.Join(homeDir, "t"), nil
+}
+
+func createRandomTryDir(base string) (string, error) {
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		return "", fmt.Errorf("create base directory %s: %w", base, err)
 	}
 
+	rand.Seed(time.Now().UnixNano())
+	for i := 0; i < 10; i++ {
+		name := strconv.Itoa(rand.Intn(9000) + 1000) // 1000-9999
+		full := filepath.Join(base, name)
+		if _, err := os.Stat(full); errors.Is(err, os.ErrNotExist) {
+			if err := os.Mkdir(full, 0o755); err != nil {
+				if errors.Is(err, os.ErrExist) {
+					continue
+				}
+				return "", fmt.Errorf("create directory %s: %w", full, err)
+			}
+			return full, nil
+		}
+	}
+
+	return "", fmt.Errorf("unable to create unique directory in %s after several attempts", base)
+}
+
+func detectShell() string {
+	if shell := os.Getenv("SHELL"); strings.TrimSpace(shell) != "" {
+		return shell
+	}
+	return "/bin/bash"
+}
+
+type docSpec struct {
+	description string
+	dirSegments []string
+	fileName    func(time.Time) string
+}
+
+func monthlyDocName(day int) func(time.Time) string {
+	return func(now time.Time) string {
+		monthSuffix := strings.ToLower(now.Format("Jan"))
+		return fmt.Sprintf("%d-%s.mdx", day, monthSuffix)
+	}
+}
+
+func lookingBackDocName(now time.Time) string {
+	yearSuffix := now.Format("06")
+	monthName := strings.ToLower(now.Format("January"))
+	return fmt.Sprintf("%s-%s.mdx", yearSuffix, monthName)
+}
+
+var docSpecs = map[string]docSpec{
+	"changes": {
+		description: "Open the current monthly changes doc in Cursor",
+		dirSegments: []string{"nikiv-old", "content", "docs", "changes"},
+		fileName:    monthlyDocName(25),
+	},
+	"metrics": {
+		description: "Open the current monthly metrics doc in Cursor",
+		dirSegments: []string{"nikiv-old", "content", "docs", "metrics"},
+		fileName:    monthlyDocName(25),
+	},
+	"log": {
+		description: "Open the current monthly log doc in Cursor",
+		dirSegments: []string{"nikiv-old", "content", "docs", "log"},
+		fileName:    monthlyDocName(25),
+	},
+	"looking-back": {
+		description: "Open the current looking-back doc in Cursor",
+		dirSegments: []string{"nikiv-old", "content", "docs", "looking-back"},
+		fileName:    lookingBackDocName,
+	},
+}
+
+var docSpecAliases = map[string]string{
+	"lookingback": "looking-back",
+}
+
+func availableDocKeys() []string {
+	keys := make([]string, 0, len(docSpecs))
+	for key := range docSpecs {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func resolveDocSpec(key string) (docSpec, bool) {
+	normalized := strings.TrimSpace(strings.ToLower(key))
+	normalized = strings.ReplaceAll(normalized, "_", "-")
+	if alias, ok := docSpecAliases[normalized]; ok {
+		normalized = alias
+	}
+
+	spec, ok := docSpecs[normalized]
+	return spec, ok
+}
+
+func openDoc(ctx *snap.Context, spec docSpec) error {
 	now := time.Now()
-	monthSuffix := strings.ToLower(now.Format("Jan"))
-	fileName := fmt.Sprintf("25-%s.mdx", monthSuffix)
+	if spec.fileName == nil {
+		return reportError(ctx, fmt.Errorf("missing file name generator for doc"))
+	}
+	fileName := spec.fileName(now)
+	if fileName = strings.TrimSpace(fileName); fileName == "" {
+		return reportError(ctx, fmt.Errorf("empty file name for doc"))
+	}
 
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return reportError(ctx, fmt.Errorf("determine home directory: %w", err))
 	}
 
-	baseDir := filepath.Join(homeDir, "nikiv", "content", "docs", "changes")
+	baseDir := filepath.Join(append([]string{homeDir}, spec.dirSegments...)...)
 	if err := os.MkdirAll(baseDir, 0o755); err != nil {
 		return reportError(ctx, fmt.Errorf("create directory %s: %w", baseDir, err))
 	}
@@ -1104,50 +1452,58 @@ func runOpenChanges(ctx *snap.Context) error {
 	return nil
 }
 
+func runOpenDoc(ctx *snap.Context) error {
+	if ctx.NArgs() != 1 {
+		fmt.Fprintf(ctx.Stderr(), "Usage: %s openDoc <doc-type>\n", commandName)
+		fmt.Fprintf(ctx.Stderr(), "Available doc types: %s\n", strings.Join(availableDocKeys(), ", "))
+		return fmt.Errorf("expected 1 argument, got %d", ctx.NArgs())
+	}
+
+	docType := ctx.Arg(0)
+	docType = strings.TrimSpace(docType)
+	spec, ok := resolveDocSpec(docType)
+	if !ok {
+		fmt.Fprintf(ctx.Stderr(), "Unknown doc type %q. Available: %s\n", docType, strings.Join(availableDocKeys(), ", "))
+		return fmt.Errorf("unknown doc type %q", docType)
+	}
+
+	return openDoc(ctx, spec)
+}
+
+func runOpenChanges(ctx *snap.Context) error {
+	if ctx.NArgs() != 0 {
+		fmt.Fprintf(ctx.Stderr(), "Usage: %s openChanges\n", commandName)
+		return fmt.Errorf("expected 0 arguments, got %d", ctx.NArgs())
+	}
+
+	return openDoc(ctx, docSpecs["changes"])
+}
+
+func runOpenMetrics(ctx *snap.Context) error {
+	if ctx.NArgs() != 0 {
+		fmt.Fprintf(ctx.Stderr(), "Usage: %s openMetrics\n", commandName)
+		return fmt.Errorf("expected 0 arguments, got %d", ctx.NArgs())
+	}
+
+	return openDoc(ctx, docSpecs["metrics"])
+}
+
+func runOpenLog(ctx *snap.Context) error {
+	if ctx.NArgs() != 0 {
+		fmt.Fprintf(ctx.Stderr(), "Usage: %s openLog\n", commandName)
+		return fmt.Errorf("expected 0 arguments, got %d", ctx.NArgs())
+	}
+
+	return openDoc(ctx, docSpecs["log"])
+}
+
 func runOpenLookingBack(ctx *snap.Context) error {
 	if ctx.NArgs() != 0 {
 		fmt.Fprintf(ctx.Stderr(), "Usage: %s openLookingBack\n", commandName)
 		return fmt.Errorf("expected 0 arguments, got %d", ctx.NArgs())
 	}
 
-	now := time.Now()
-	yearSuffix := now.Format("06")
-	monthName := strings.ToLower(now.Format("January"))
-	fileName := fmt.Sprintf("%s-%s.mdx", yearSuffix, monthName)
-
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return reportError(ctx, fmt.Errorf("determine home directory: %w", err))
-	}
-
-	baseDir := filepath.Join(homeDir, "nikiv", "content", "docs", "looking-back")
-	if err := os.MkdirAll(baseDir, 0o755); err != nil {
-		return reportError(ctx, fmt.Errorf("create directory %s: %w", baseDir, err))
-	}
-
-	targetFile := filepath.Join(baseDir, fileName)
-
-	created := false
-	if _, err := os.Stat(targetFile); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			if err := os.WriteFile(targetFile, []byte{}, 0o644); err != nil {
-				return reportError(ctx, fmt.Errorf("create file %s: %w", targetFile, err))
-			}
-			created = true
-		} else {
-			return reportError(ctx, fmt.Errorf("stat %s: %w", targetFile, err))
-		}
-	}
-
-	if err := openInCursor(ctx, targetFile); err != nil {
-		return reportError(ctx, err)
-	}
-
-	if created {
-		fmt.Fprintf(ctx.Stdout(), "✔️ Created %s\n", targetFile)
-	}
-	fmt.Fprintf(ctx.Stdout(), "✔️ Opened %s in Cursor\n", targetFile)
-	return nil
+	return openDoc(ctx, docSpecs["looking-back"])
 }
 
 func runOpenSqlite(ctx *snap.Context) error {

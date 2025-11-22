@@ -30,3 +30,4 @@ private
 .gocache
 .gomodcache
 lang
+run.go
