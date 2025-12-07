@@ -57,3 +57,5 @@ For `fgo commit`, export `OPENAI_API_KEY` in your shell profile (e.g. fish confi
 For `fgo youtubeToSound`, the CLI automatically passes `--cookies-from-browser` using Safari cookies. Override this by setting `FLOW_YOUTUBE_COOKIES_BROWSER` (e.g. `firefox`), set it to `none` to skip cookies entirely, or pass your own `--cookies*` flags after the URL—they are forwarded directly to `yt-dlp`.
 
 If you run `fgo youtubeToSound` without arguments, the command grabs the frontmost Safari tab URL automatically.
+
+A shorthand `fe` alias is installed alongside `fgo`; update or remove the symlink at ~/bin/fe if you prefer a different name.

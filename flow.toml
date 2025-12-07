@@ -1,7 +1,9 @@
 version = 1
+name = "go"
 
 [deps]
 go = "go"
+fast = "github.com/1focus-ai/fast"
 
 [[tasks]]
 name = "default"
@@ -13,8 +15,7 @@ Available tasks:
 - flow [args...]      Build a temp fgo binary and run it with forwarded args.
 - dev [args...]       Alias for flow.
 - run [args...]       Alias for flow.
-- deploy              Build/install fgo to ~/bin (and alias fe).
-- deploy_moonbit      Build/install fm to ~/bin without alias.
+- deploy [name]       Build/install to ~/bin. Default: fgo (with fe alias). Use "fm" for moonbit.
 EOF
 '''
 
@@ -111,8 +112,16 @@ command = '''
 set -euo pipefail
 repo_root="$PWD"
 install_dir="$HOME/bin"
-command_name="fgo"
-alias_name="fe"
+
+# Default to fgo with fe alias, or use fm (no alias) if "fm" is passed
+if [ "${1:-}" = "fm" ]; then
+  command_name="fm"
+  alias_name=""
+else
+  command_name="fgo"
+  alias_name="fe"
+fi
+
 mkdir -p "$install_dir"
 
 pushd cli/flow >/dev/null
@@ -224,121 +233,8 @@ esac
 '''
 
 [[tasks]]
-name = "deploy_moonbit"
-description = "Build the fm CLI binary, install it to ~/bin as fm, and skip alias creation."
-dependencies = ["go"]
-command = '''
-set -euo pipefail
-repo_root="$PWD"
-install_dir="$HOME/bin"
-command_name="fm"
-alias_name=""
-mkdir -p "$install_dir"
-
-pushd cli/flow >/dev/null
-export GOCACHE="${GOCACHE:-$repo_root/.gocache}"
-export GOMODCACHE="${GOMODCACHE:-$repo_root/.gomodcache}"
-mkdir -p "$GOCACHE"
-mkdir -p "$GOMODCACHE"
-tmp_root="${TMPDIR:-/tmp}"
-tmp_dir="$(mktemp -d "$tmp_root/fgo-install-XXXXXX")"
-trap 'rm -rf "$tmp_dir"' EXIT
-go build -o "$tmp_dir/$command_name" .
-popd >/dev/null
-install_path="$install_dir/$command_name"
-mv "$tmp_dir/$command_name" "$install_path"
-chmod 755 "$install_path"
-rm -rf "$tmp_dir"
-echo "Installed CLI to $install_path"
-if [ -n "$alias_name" ]; then
-  ln -sf "$install_path" "$install_dir/$alias_name"
-  if [ "$alias_name" = "$command_name" ]; then
-    echo "Ensured $install_dir/$alias_name points to $install_path"
-  else
-    echo "Created symlink $install_dir/$alias_name -> $install_path"
-  fi
-fi
-
-help_snapshot="$("$install_path" --help 2>&1 || true)"
-notes=$(printf 'Running `%s` without any arguments opens an embedded fzf palette so you can fuzzy-search commands and read their descriptions before executing them.\n\nFor `%s commit`, export `OPENAI_API_KEY` in your shell profile (e.g. fish config) so the CLI can talk to OpenAI. This environment variable is the only requirement, so the command works in local shells and CI alike.\n\nFor `%s youtubeToSound`, the CLI automatically passes `--cookies-from-browser` using Safari cookies. Override this by setting `FLOW_YOUTUBE_COOKIES_BROWSER` (e.g. `firefox`), set it to `none` to skip cookies entirely, or pass your own `--cookies*` flags after the URL—they are forwarded directly to `yt-dlp`.\n\nIf you run `%s youtubeToSound` without arguments, the command grabs the frontmost Safari tab URL automatically.' \
-  "$command_name" "$command_name" "$command_name" "$command_name")
-alias_note=""
-if [ -n "$alias_name" ]; then
-  alias_note=$(printf 'A shorthand `%s` alias is installed alongside `%s`; update or remove the symlink at ~/bin/%s if you prefer a different name.' \
-    "$alias_name" "$command_name" "$alias_name")
-  notes=$(printf '%s\n\n%s' "$notes" "$alias_note")
-fi
-
-{
-  echo "# $command_name"
-  echo
-  printf '```\n%s --help\n' "$command_name"
-  printf '%s\n' "$help_snapshot"
-  printf '```\n\n'
-  echo '## Notes'
-  echo
-  printf '%s\n' "$notes"
-} > "$repo_root/cli/flow/readme.md"
-
-case ":${PATH:-}:" in
-  *:"$install_dir":*)
-    echo "$install_dir already present in PATH"
-    exit 0
-    ;;
-esac
-
-shell_name="$(basename "${SHELL:-}")"
-marker="# >>> ${command_name} initialize >>>"
-end_marker="# <<< ${command_name} initialize <<<"
-target=""
-snippet=""
-
-case "$shell_name" in
-  fish)
-    target="$HOME/.config/fish/conf.d/${command_name}.fish"
-    snippet='fish_add_path $HOME/bin'
-    ;;
-  zsh)
-    target="$HOME/.zshrc"
-    snippet='export PATH="$HOME/bin:$PATH"'
-    ;;
-  bash)
-    target="$HOME/.bashrc"
-    snippet='export PATH="$HOME/bin:$PATH"'
-    ;;
-  *)
-    echo "$install_dir is not on PATH. Add it to your shell configuration manually."
-    exit 0
-    ;;
-esac
-
-if [ -n "$target" ] && [ -f "$target" ] && grep -F "$marker" "$target" >/dev/null 2>&1; then
-  echo "$install_dir already configured via $target"
-  exit 0
-fi
-
-printf 'Add %s to PATH in %s? [y/N]: ' "$install_dir" "${target:-manual}"
-read -r reply || reply=""
-case "$reply" in
-  [yY]*)
-    mkdir -p "$(dirname "$target")"
-    if [ "$shell_name" = "fish" ]; then
-      {
-        echo "$marker"
-        echo "$snippet"
-        echo "$end_marker"
-      } > "$target"
-    else
-      {
-        printf '\n%s\n' "$marker"
-        printf '%s\n' "$snippet"
-        printf '%s\n' "$end_marker"
-      } >> "$target"
-    fi
-    echo "Updated $target. Restart your shell or source the file to use $command_name."
-    ;;
-  *)
-    echo "Skipped PATH update. Add $install_dir to PATH manually if needed."
-    ;;
-esac
-'''
+name = "commit"
+command = "fast commitPush"
+description = "Commit with AI"
+dependencies = ["fast"]
+delegate_to_hub = true

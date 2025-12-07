@@ -1,0 +1,14 @@
+version = 1
+
+[deps]
+git = "git"
+
+[[tasks]]
+name = "deploy"
+description = "Build and install fgo to ~/bin"
+dependencies = ["git"]
+command = '''
+set -euo pipefail
+go build -o ~/bin/fgo .
+echo "Installed: ~/bin/fgo"
+'''

@@ -5,7 +5,11 @@ go 1.24
 require (
 	github.com/dzonerzy/go-snap v0.1.1
 	github.com/ktr0731/go-fuzzyfinder v0.9.0
+	github.com/severity1/claude-code-sdk-go v0.0.0
+	gopkg.in/yaml.v3 v3.0.1
 )
+
+replace github.com/severity1/claude-code-sdk-go => /Users/nikiv/fork-i/severity1/claude-code-sdk-go
 
 require (
 	github.com/gdamore/encoding v1.0.1 // indirect
@@ -19,5 +23,4 @@ require (
 	golang.org/x/sys v0.32.0 // indirect
 	golang.org/x/term v0.31.0 // indirect
 	golang.org/x/text v0.24.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

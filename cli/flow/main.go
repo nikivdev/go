@@ -28,6 +28,7 @@ import (
 	openai "github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
 	"github.com/openai/openai-go/shared"
+	claudecode "github.com/severity1/claude-code-sdk-go"
 	_ "modernc.org/sqlite"
 )
 
@@ -354,6 +355,22 @@ func main() {
 
 	registerCommand(app, "privateForkRepoAndOpen", "Private fork a repo and open it in Cursor", func(ctx *snap.Context) error {
 		return runPrivateForkRepoAndOpen(ctx)
+	})
+
+	registerCommand(app, "createRepoFromRemote", "Create a GitHub repo based on the current git remote origin", func(ctx *snap.Context) error {
+		return runCreateRepoFromRemote(ctx)
+	})
+
+	registerCommand(app, "gitIgnore", "Select changed/untracked files to add to .gitignore", func(ctx *snap.Context) error {
+		return runGitIgnore(ctx)
+	})
+
+	registerCommand(app, "gitDiffSize", "Show changed/untracked files sorted by size (tokens)", func(ctx *snap.Context) error {
+		return runGitDiffSize(ctx)
+	})
+
+	registerCommand(app, "smartCherryPick", "AI-assisted cherry-pick with automatic conflict resolution", func(ctx *snap.Context) error {
+		return runSmartCherryPick(ctx)
 	})
 
 	registerCommand(app, "listWindowsOfApp", "List visible windows for a running macOS app", func(ctx *snap.Context) error {
@@ -3042,6 +3059,548 @@ func createPrivateRepository(ctx *snap.Context, owner, repo string) error {
 		return fmt.Errorf("gh repo create %s: %w", repoFull, err)
 	}
 	return nil
+}
+
+func runCreateRepoFromRemote(ctx *snap.Context) error {
+	if err := ensureGitRepository(); err != nil {
+		return err
+	}
+
+	cmd := exec.Command("git", "remote", "get-url", "origin")
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("get git remote origin: %w", err)
+	}
+
+	remoteURL := strings.TrimSpace(string(output))
+	if remoteURL == "" {
+		return fmt.Errorf("git remote origin is empty")
+	}
+
+	owner, repo, _, err := parseGitHubCloneInfo(remoteURL)
+	if err != nil {
+		return fmt.Errorf("parse remote URL %q: %w", remoteURL, err)
+	}
+
+	exists, err := githubRepoExists(owner, repo)
+	if err != nil {
+		return fmt.Errorf("check if repo exists: %w", err)
+	}
+
+	if exists {
+		fmt.Fprintf(ctx.Stdout(), "Repository %s/%s already exists\n", owner, repo)
+		return nil
+	}
+
+	if err := createPrivateRepository(ctx, owner, repo); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(ctx.Stdout(), "Created repository %s/%s\n", owner, repo)
+	return nil
+}
+
+func runGitIgnore(ctx *snap.Context) error {
+	if err := ensureGitRepository(); err != nil {
+		return err
+	}
+
+	// Get all changed and untracked files
+	cmd := exec.Command("git", "status", "--porcelain")
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("git status: %w", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) == 0 || (len(lines) == 1 && lines[0] == "") {
+		fmt.Fprintln(ctx.Stdout(), "No changed or untracked files")
+		return nil
+	}
+
+	type fileEntry struct {
+		status string
+		path   string
+	}
+
+	var entries []fileEntry
+	seenDirs := make(map[string]bool)
+
+	for _, line := range lines {
+		if len(line) < 4 {
+			continue
+		}
+		status := strings.TrimSpace(line[:2])
+		path := strings.TrimSpace(line[3:])
+		if path == "" {
+			continue
+		}
+
+		entries = append(entries, fileEntry{status: status, path: path})
+
+		// Also add parent directories as options
+		dir := filepath.Dir(path)
+		for dir != "." && dir != "/" && !seenDirs[dir] {
+			seenDirs[dir] = true
+			entries = append(entries, fileEntry{status: "dir", path: dir + "/"})
+			dir = filepath.Dir(dir)
+		}
+	}
+
+	if len(entries) == 0 {
+		fmt.Fprintln(ctx.Stdout(), "No files to ignore")
+		return nil
+	}
+
+	// Sort: directories first, then files
+	sort.Slice(entries, func(i, j int) bool {
+		iIsDir := strings.HasSuffix(entries[i].path, "/")
+		jIsDir := strings.HasSuffix(entries[j].path, "/")
+		if iIsDir != jIsDir {
+			return iIsDir
+		}
+		return entries[i].path < entries[j].path
+	})
+
+	indices, err := fuzzyfinder.FindMulti(
+		entries,
+		func(i int) string {
+			e := entries[i]
+			if e.status == "dir" {
+				return fmt.Sprintf("[dir]  %s", e.path)
+			}
+			return fmt.Sprintf("[%s]   %s", e.status, e.path)
+		},
+		fuzzyfinder.WithPromptString("gitIgnore (tab to select)> "),
+	)
+	if err != nil {
+		if errors.Is(err, fuzzyfinder.ErrAbort) {
+			return nil
+		}
+		return fmt.Errorf("select files: %w", err)
+	}
+
+	if len(indices) == 0 {
+		fmt.Fprintln(ctx.Stdout(), "No files selected")
+		return nil
+	}
+
+	// Read existing .gitignore
+	gitignorePath := ".gitignore"
+	existingContent := ""
+	if data, err := os.ReadFile(gitignorePath); err == nil {
+		existingContent = string(data)
+	}
+
+	existingLines := make(map[string]bool)
+	for _, line := range strings.Split(existingContent, "\n") {
+		existingLines[strings.TrimSpace(line)] = true
+	}
+
+	// Collect new entries
+	var newEntries []string
+	for _, idx := range indices {
+		path := entries[idx].path
+		if !existingLines[path] {
+			newEntries = append(newEntries, path)
+		}
+	}
+
+	if len(newEntries) == 0 {
+		fmt.Fprintln(ctx.Stdout(), "All selected entries already in .gitignore")
+		return nil
+	}
+
+	// Append to .gitignore
+	f, err := os.OpenFile(gitignorePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("open .gitignore: %w", err)
+	}
+	defer f.Close()
+
+	// Add newline if file doesn't end with one
+	if existingContent != "" && !strings.HasSuffix(existingContent, "\n") {
+		if _, err := f.WriteString("\n"); err != nil {
+			return fmt.Errorf("write to .gitignore: %w", err)
+		}
+	}
+
+	for _, entry := range newEntries {
+		if _, err := f.WriteString(entry + "\n"); err != nil {
+			return fmt.Errorf("write to .gitignore: %w", err)
+		}
+		fmt.Fprintf(ctx.Stdout(), "Added to .gitignore: %s\n", entry)
+	}
+
+	return nil
+}
+
+func runGitDiffSize(ctx *snap.Context) error {
+	if err := ensureGitRepository(); err != nil {
+		return err
+	}
+
+	// Get all changed and untracked files
+	cmd := exec.Command("git", "status", "--porcelain")
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("git status: %w", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) == 0 || (len(lines) == 1 && lines[0] == "") {
+		fmt.Fprintln(ctx.Stdout(), "No changed or untracked files")
+		return nil
+	}
+
+	type fileSize struct {
+		status string
+		path   string
+		bytes  int64
+		tokens int64
+	}
+
+	var files []fileSize
+	for _, line := range lines {
+		if len(line) < 4 {
+			continue
+		}
+		status := strings.TrimSpace(line[:2])
+		path := strings.TrimSpace(line[3:])
+		if path == "" {
+			continue
+		}
+
+		// Get file size
+		var size int64
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			size = info.Size()
+		}
+
+		files = append(files, fileSize{
+			status: status,
+			path:   path,
+			bytes:  size,
+			tokens: size / 4, // rough estimate
+		})
+	}
+
+	if len(files) == 0 {
+		fmt.Fprintln(ctx.Stdout(), "No files to show")
+		return nil
+	}
+
+	// Sort by size descending
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].bytes > files[j].bytes
+	})
+
+	// Print with size info
+	fmt.Fprintln(ctx.Stdout(), "Files sorted by size (largest first):")
+	fmt.Fprintln(ctx.Stdout(), "")
+
+	const (
+		warnThreshold = 100000   // 100KB (~25k tokens)
+		bigThreshold  = 1000000  // 1MB (~250k tokens)
+	)
+
+	var tooBigFiles []string
+
+	for _, f := range files {
+		var sizeStr string
+		if f.bytes >= 1000000 {
+			sizeStr = fmt.Sprintf("%.1fMB", float64(f.bytes)/1000000)
+		} else if f.bytes >= 1000 {
+			sizeStr = fmt.Sprintf("%.1fKB", float64(f.bytes)/1000)
+		} else {
+			sizeStr = fmt.Sprintf("%dB", f.bytes)
+		}
+
+		var marker string
+		if f.bytes >= bigThreshold {
+			marker = " !! TOO BIG"
+			tooBigFiles = append(tooBigFiles, f.path)
+		} else if f.bytes >= warnThreshold {
+			marker = " ! large"
+		}
+
+		fmt.Fprintf(ctx.Stdout(), "[%s] %8s  %6d tokens  %s%s\n",
+			f.status, sizeStr, f.tokens, f.path, marker)
+	}
+
+	// Prompt to add too-big files to .gitignore
+	if len(tooBigFiles) > 0 {
+		fmt.Fprintln(ctx.Stdout(), "")
+		for _, path := range tooBigFiles {
+			fmt.Fprintf(ctx.Stdout(), "Add %s to .gitignore? [y/N]: ", path)
+			reader := bufio.NewReader(ctx.Stdin())
+			reply, _ := reader.ReadString('\n')
+			reply = strings.TrimSpace(strings.ToLower(reply))
+
+			if reply == "y" || reply == "yes" {
+				// Check if already in .gitignore
+				gitignorePath := ".gitignore"
+				existingContent := ""
+				if data, err := os.ReadFile(gitignorePath); err == nil {
+					existingContent = string(data)
+				}
+
+				alreadyIgnored := false
+				for _, line := range strings.Split(existingContent, "\n") {
+					if strings.TrimSpace(line) == path {
+						alreadyIgnored = true
+						break
+					}
+				}
+
+				if alreadyIgnored {
+					fmt.Fprintf(ctx.Stdout(), "  Already in .gitignore\n")
+				} else {
+					f, err := os.OpenFile(gitignorePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+					if err != nil {
+						fmt.Fprintf(ctx.Stderr(), "  Error opening .gitignore: %v\n", err)
+						continue
+					}
+					if existingContent != "" && !strings.HasSuffix(existingContent, "\n") {
+						f.WriteString("\n")
+					}
+					f.WriteString(path + "\n")
+					f.Close()
+					fmt.Fprintf(ctx.Stdout(), "  Added to .gitignore\n")
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func runSmartCherryPick(ctx *snap.Context) error {
+	if err := ensureGitRepository(); err != nil {
+		return err
+	}
+
+	args := ctx.Args()
+	if len(args) == 0 {
+		fmt.Fprintln(ctx.Stderr(), "Usage: smartCherryPick <commit-hash> [end-hash]")
+		fmt.Fprintln(ctx.Stderr(), "  Single commit: smartCherryPick abc123")
+		fmt.Fprintln(ctx.Stderr(), "  Range of commits: smartCherryPick abc123 def456")
+		return fmt.Errorf("missing commit hash argument")
+	}
+
+	startHash := args[0]
+	var endHash string
+	if len(args) > 1 {
+		endHash = args[1]
+	}
+
+	// Get list of commits to cherry-pick
+	var commits []string
+	if endHash == "" {
+		// Single commit
+		commits = []string{startHash}
+	} else {
+		// Range of commits (from startHash to endHash, inclusive)
+		cmd := exec.Command("git", "rev-list", "--reverse", startHash+"^.."+endHash)
+		output, err := cmd.Output()
+		if err != nil {
+			return fmt.Errorf("failed to get commit range: %w", err)
+		}
+		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+		for _, line := range lines {
+			if line != "" {
+				commits = append(commits, line)
+			}
+		}
+	}
+
+	if len(commits) == 0 {
+		return fmt.Errorf("no commits found in range")
+	}
+
+	fmt.Fprintf(ctx.Stdout(), "Smart cherry-picking %d commit(s)...\n", len(commits))
+
+	// Get current working directory
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get working directory: %w", err)
+	}
+
+	for i, commit := range commits {
+		fmt.Fprintf(ctx.Stdout(), "\n[%d/%d] Processing commit %s\n", i+1, len(commits), commit)
+
+		// Get commit info for context
+		commitMsgCmd := exec.Command("git", "log", "-1", "--format=%s", commit)
+		commitMsgOut, _ := commitMsgCmd.Output()
+		commitMsg := strings.TrimSpace(string(commitMsgOut))
+		fmt.Fprintf(ctx.Stdout(), "  Message: %s\n", commitMsg)
+
+		// Try normal cherry-pick first
+		cherryPickCmd := exec.Command("git", "cherry-pick", commit)
+		cherryPickCmd.Stdout = ctx.Stdout()
+		cherryPickCmd.Stderr = ctx.Stderr()
+
+		if err := cherryPickCmd.Run(); err != nil {
+			// Check if there are conflicts
+			statusCmd := exec.Command("git", "status", "--porcelain")
+			statusOut, _ := statusCmd.Output()
+
+			if strings.Contains(string(statusOut), "UU") || strings.Contains(string(statusOut), "AA") || strings.Contains(string(statusOut), "DD") {
+				fmt.Fprintf(ctx.Stdout(), "\n  Conflicts detected, using AI to resolve...\n")
+
+				// Get the diff of the commit being cherry-picked
+				diffCmd := exec.Command("git", "show", commit, "--format=")
+				diffOut, _ := diffCmd.Output()
+
+				// Get conflicted files
+				conflictedFiles := getConflictedFiles()
+
+				if len(conflictedFiles) == 0 {
+					// Abort and continue to next commit
+					exec.Command("git", "cherry-pick", "--abort").Run()
+					return fmt.Errorf("cherry-pick failed but no conflicts detected")
+				}
+
+				// Use Claude to resolve each conflicted file
+				for _, conflictedFile := range conflictedFiles {
+					fmt.Fprintf(ctx.Stdout(), "  Resolving: %s\n", conflictedFile)
+
+					// Read the conflicted file content
+					conflictedContent, err := os.ReadFile(conflictedFile)
+					if err != nil {
+						exec.Command("git", "cherry-pick", "--abort").Run()
+						return fmt.Errorf("failed to read conflicted file %s: %w", conflictedFile, err)
+					}
+
+					// Build prompt for Claude
+					prompt := fmt.Sprintf(`You are helping resolve a git merge conflict during a cherry-pick operation.
+
+The commit being cherry-picked has this message: %s
+
+The diff from the original commit:
+%s
+
+The file "%s" has merge conflicts. Here is the current content with conflict markers:
+%s
+
+Please resolve the conflicts intelligently by:
+1. Understanding the intent of both changes
+2. Merging them in a way that preserves both intentions where possible
+3. If changes conflict directly, prefer the incoming changes (from the cherry-picked commit) but ensure the result is valid code
+
+Output ONLY the resolved file content, without any explanation or markdown code blocks. Just the raw file content that should replace the conflicted file.`,
+						commitMsg,
+						string(diffOut),
+						conflictedFile,
+						string(conflictedContent))
+
+					// Call Claude Code SDK
+					bgCtx := context.Background()
+					iterator, err := claudecode.Query(bgCtx, prompt,
+						claudecode.WithCwd(cwd),
+						claudecode.WithPermissionMode(claudecode.PermissionModeBypassPermissions),
+					)
+					if err != nil {
+						exec.Command("git", "cherry-pick", "--abort").Run()
+						return fmt.Errorf("failed to query Claude: %w", err)
+					}
+
+					var resolvedContent strings.Builder
+					for {
+						message, err := iterator.Next(bgCtx)
+						if err != nil {
+							if errors.Is(err, claudecode.ErrNoMoreMessages) {
+								break
+							}
+							iterator.Close()
+							exec.Command("git", "cherry-pick", "--abort").Run()
+							return fmt.Errorf("failed to get Claude response: %w", err)
+						}
+
+						if message == nil {
+							break
+						}
+
+						switch msg := message.(type) {
+						case *claudecode.AssistantMessage:
+							for _, block := range msg.Content {
+								if textBlock, ok := block.(*claudecode.TextBlock); ok {
+									resolvedContent.WriteString(textBlock.Text)
+								}
+							}
+						case *claudecode.ResultMessage:
+							if msg.IsError {
+								iterator.Close()
+								exec.Command("git", "cherry-pick", "--abort").Run()
+								return fmt.Errorf("Claude error: %s", msg.Result)
+							}
+						}
+					}
+					iterator.Close()
+
+					// Write the resolved content
+					resolved := resolvedContent.String()
+					if resolved == "" {
+						exec.Command("git", "cherry-pick", "--abort").Run()
+						return fmt.Errorf("Claude returned empty resolution for %s", conflictedFile)
+					}
+
+					if err := os.WriteFile(conflictedFile, []byte(resolved), 0644); err != nil {
+						exec.Command("git", "cherry-pick", "--abort").Run()
+						return fmt.Errorf("failed to write resolved file %s: %w", conflictedFile, err)
+					}
+
+					// Stage the resolved file
+					addCmd := exec.Command("git", "add", conflictedFile)
+					if err := addCmd.Run(); err != nil {
+						exec.Command("git", "cherry-pick", "--abort").Run()
+						return fmt.Errorf("failed to stage resolved file %s: %w", conflictedFile, err)
+					}
+
+					fmt.Fprintf(ctx.Stdout(), "    ✓ Resolved and staged\n")
+				}
+
+				// Continue the cherry-pick
+				continueCmd := exec.Command("git", "cherry-pick", "--continue")
+				continueCmd.Env = append(os.Environ(), "GIT_EDITOR=true") // Skip commit message edit
+				continueCmd.Stdout = ctx.Stdout()
+				continueCmd.Stderr = ctx.Stderr()
+
+				if err := continueCmd.Run(); err != nil {
+					exec.Command("git", "cherry-pick", "--abort").Run()
+					return fmt.Errorf("failed to continue cherry-pick after resolution: %w", err)
+				}
+
+				fmt.Fprintf(ctx.Stdout(), "  ✓ Cherry-pick completed with AI resolution\n")
+			} else {
+				// Some other error, abort
+				exec.Command("git", "cherry-pick", "--abort").Run()
+				return fmt.Errorf("cherry-pick failed: %w", err)
+			}
+		} else {
+			fmt.Fprintf(ctx.Stdout(), "  ✓ Cherry-pick completed (no conflicts)\n")
+		}
+	}
+
+	fmt.Fprintf(ctx.Stdout(), "\n✓ All %d commit(s) cherry-picked successfully!\n", len(commits))
+	return nil
+}
+
+func getConflictedFiles() []string {
+	cmd := exec.Command("git", "diff", "--name-only", "--diff-filter=U")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+
+	var files []string
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	for _, line := range lines {
+		if line != "" {
+			files = append(files, line)
+		}
+	}
+	return files
 }
 
 func gitCloneTo(ctx *snap.Context, cloneURL, targetDir string) error {

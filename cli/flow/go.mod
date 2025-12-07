@@ -36,6 +36,7 @@ require (
 
 require (
 	github.com/openai/openai-go v1.12.0
+	github.com/severity1/claude-code-sdk-go v0.0.0
 	github.com/tidwall/gjson v1.14.4 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
@@ -60,3 +61,5 @@ replace golang.org/x/telemetry => github.com/golang/telemetry v0.0.0-20240228155
 replace golang.org/x/crypto => github.com/golang/crypto v0.23.0
 
 replace golang.org/x/mod => github.com/golang/mod v0.15.0
+
+replace github.com/severity1/claude-code-sdk-go => /Users/nikiv/fork-i/severity1/claude-code-sdk-go
