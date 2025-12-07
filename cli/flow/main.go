@@ -4119,7 +4119,7 @@ end tell`
 		return fmt.Errorf("failed to copy to clipboard: %w", err)
 	}
 
-	fmt.Fprintf(ctx.Stdout(), "Copied: %s\n", song)
+	fmt.Fprintln(ctx.Stdout(), song)
 	return nil
 }
 
