@@ -341,8 +341,8 @@ func main() {
 		return runCheckPort(ctx)
 	})
 
-	registerCommand(app, "spotify", "Copy currently playing Spotify song to clipboard", func(ctx *snap.Context) error {
-		return runSpotify(ctx)
+	registerCommand(app, "spotifyCurrentPlayingSongCopy", "Copy currently playing Spotify song to clipboard", func(ctx *snap.Context) error {
+		return runSpotifyCurrentPlayingSongCopy(ctx)
 	})
 
 	registerCommand(app, "tasks", "List Taskfile tasks with descriptions", func(ctx *snap.Context) error {
@@ -4089,7 +4089,7 @@ func runCheckPort(ctx *snap.Context) error {
 	return nil
 }
 
-func runSpotify(ctx *snap.Context) error {
+func runSpotifyCurrentPlayingSongCopy(ctx *snap.Context) error {
 	script := `tell application "Spotify"
   if player state is playing then
     set trackName to name of current track
