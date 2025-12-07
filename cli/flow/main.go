@@ -337,6 +337,10 @@ func main() {
 		return runKillPort(ctx)
 	})
 
+	registerCommand(app, "checkPort", "Show what process is running on a given port", func(ctx *snap.Context) error {
+		return runCheckPort(ctx)
+	})
+
 	registerCommand(app, "tasks", "List Taskfile tasks with descriptions", func(ctx *snap.Context) error {
 		return runTasks(ctx)
 	})
@@ -4041,6 +4045,43 @@ func runKillPort(ctx *snap.Context) error {
 	}
 
 	fmt.Fprintf(ctx.Stdout(), "Killed %s (pid %d) listening on %s\n", selected.Command, selected.PID, selected.Address)
+	return nil
+}
+
+func runCheckPort(ctx *snap.Context) error {
+	if ctx.NArgs() != 1 {
+		fmt.Fprintf(ctx.Stderr(), "Usage: %s checkPort <port>\n", commandName)
+		return reportError(ctx, fmt.Errorf("expected 1 argument, got %d", ctx.NArgs()))
+	}
+
+	port := strings.TrimSpace(ctx.Arg(0))
+	if port == "" {
+		fmt.Fprintf(ctx.Stderr(), "Usage: %s checkPort <port>\n", commandName)
+		return reportError(ctx, fmt.Errorf("port cannot be empty"))
+	}
+
+	processes, err := listListeningProcesses()
+	if err != nil {
+		return reportError(ctx, err)
+	}
+
+	matches := filterListeningProcessesByPort(processes, port)
+	if len(matches) == 0 {
+		fmt.Fprintf(ctx.Stdout(), "Nothing running on port %s\n", port)
+		return nil
+	}
+
+	// Dedupe by PID
+	seen := make(map[int]bool)
+	fmt.Fprintf(ctx.Stdout(), "Processes on port %s:\n", port)
+	for _, p := range matches {
+		if seen[p.PID] {
+			continue
+		}
+		seen[p.PID] = true
+		fmt.Fprintf(ctx.Stdout(), "  %s (pid %d, user %s) %s\n", p.Command, p.PID, p.User, p.Address)
+	}
+
 	return nil
 }
 

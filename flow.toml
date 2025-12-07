@@ -3,7 +3,6 @@ name = "go"
 
 [deps]
 go = "go"
-fast = "github.com/1focus-ai/fast"
 
 [[tasks]]
 name = "default"
@@ -231,10 +230,3 @@ case "$reply" in
     ;;
 esac
 '''
-
-[[tasks]]
-name = "commit"
-command = "fast commitPush"
-description = "Commit with AI"
-dependencies = ["fast"]
-delegate_to_hub = true
