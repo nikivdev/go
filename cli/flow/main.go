@@ -341,6 +341,10 @@ func main() {
 		return runCheckPort(ctx)
 	})
 
+	registerCommand(app, "spotify", "Copy currently playing Spotify song to clipboard", func(ctx *snap.Context) error {
+		return runSpotify(ctx)
+	})
+
 	registerCommand(app, "tasks", "List Taskfile tasks with descriptions", func(ctx *snap.Context) error {
 		return runTasks(ctx)
 	})
@@ -4082,6 +4086,40 @@ func runCheckPort(ctx *snap.Context) error {
 		fmt.Fprintf(ctx.Stdout(), "  %s (pid %d, user %s) %s\n", p.Command, p.PID, p.User, p.Address)
 	}
 
+	return nil
+}
+
+func runSpotify(ctx *snap.Context) error {
+	script := `tell application "Spotify"
+  if player state is playing then
+    set trackName to name of current track
+    set artistName to artist of current track
+    return artistName & " - " & trackName
+  else
+    return ""
+  end if
+end tell`
+
+	cmd := exec.Command("osascript", "-e", script)
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to get Spotify info: %w", err)
+	}
+
+	song := strings.TrimSpace(string(output))
+	if song == "" {
+		fmt.Fprintln(ctx.Stdout(), "No song currently playing")
+		return nil
+	}
+
+	// Copy to clipboard
+	pbcopy := exec.Command("pbcopy")
+	pbcopy.Stdin = strings.NewReader(song)
+	if err := pbcopy.Run(); err != nil {
+		return fmt.Errorf("failed to copy to clipboard: %w", err)
+	}
+
+	fmt.Fprintf(ctx.Stdout(), "Copied: %s\n", song)
 	return nil
 }
 
