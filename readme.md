@@ -2,21 +2,17 @@
 
 ## Setup
 
-Install [task](https://taskfile.dev/docs/installation). Then run `task setup` & follow instructions until it says `✔️ you are setup`.
+Using [flow](https://github.com/nikivdev/flow), run `f setup`.
 
-## Commands
+## Tasks
 
-Run `task` to see all possible commands.
-
-## `fgo` CLI
-
-`fgo` is a CLI as a dump of various commands written in Go that are useful to me. See [cli/flow](cli/flow) for its code/docs.
-
-Run `task deploy` to install the binary as `~/bin/fgo`; it also creates an `fe` symlink as a quick alias. There is intentionally no `flow` binary deployed to PATH.
+Search through all available tasks by running `f`.
 
 ## Contributing
 
-Any PR to improve is welcome. [codex](https://github.com/openai/codex) & [cursor](https://cursor.com) are nice for dev. Great **working** & **useful** patches are most appreciated (ideally). Issues with bugs or ideas are welcome too.
+Make issues with bugs/features. Any PR to improve project is welcome. Ideally with **working** & **useful** patches but non finished ideas are great too. If idea/feature is sound, it will be merged eventually.
+
+[This](https://nikiv.dev/how-i-code) is nice overview of a coding workflow that works that you can adapt.
 
 ### 🖤
 
