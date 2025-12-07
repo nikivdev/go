@@ -230,3 +230,27 @@ case "$reply" in
     ;;
 esac
 '''
+
+[[tasks]]
+name = "spotify"
+description = "Copy currently playing Spotify song to clipboard"
+command = '''
+set -euo pipefail
+song=$(osascript -e 'tell application "Spotify"
+  if player state is playing then
+    set trackName to name of current track
+    set artistName to artist of current track
+    return artistName & " - " & trackName
+  else
+    return ""
+  end if
+end tell')
+
+if [ -z "$song" ]; then
+  echo "No song currently playing"
+  exit 1
+fi
+
+echo "$song" | pbcopy
+echo "Copied: $song"
+'''
