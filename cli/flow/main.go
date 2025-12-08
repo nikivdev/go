@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -433,6 +434,10 @@ func main() {
 		return runFocusCursorWindow(ctx)
 	})
 
+	registerCommand(app, "prDiff", "Fetch a GitHub PR diff and details for AI context", func(ctx *snap.Context) error {
+		return runPRDiff(ctx)
+	})
+
 	registerCommand(app, "version", "Reports the current version of fgo", func(ctx *snap.Context) error {
 		fmt.Fprintln(ctx.Stdout(), flowVersion)
 		return nil
@@ -626,6 +631,15 @@ func printCommandHelp(name string, out io.Writer) bool {
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, "Usage:")
 		fmt.Fprintf(out, "  %s clonePR <github-pr-url-or-owner/repo#num>\n", commandName)
+		return true
+	case "prDiff":
+		fmt.Fprintln(out, "Fetch a GitHub PR diff and details for AI context")
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Usage:")
+		fmt.Fprintf(out, "  %s prDiff <github-pr-url> [--no-comments]\n", commandName)
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Outputs PR title, description, comments, reviews, and diff as text.")
+		fmt.Fprintln(out, "Use --no-comments to exclude comments and reviews.")
 		return true
 	case "gitCheckout":
 		fmt.Fprintln(out, "Check out a branch from the remote, creating a local tracking branch if needed")
@@ -1132,6 +1146,135 @@ func runClonePR(ctx *snap.Context) error {
 	}
 
 	fmt.Fprintf(ctx.Stdout(), "✔️ Ready at %s\n", dest)
+	return nil
+}
+
+func runPRDiff(ctx *snap.Context) error {
+	if ctx.NArgs() < 1 {
+		fmt.Fprintf(ctx.Stderr(), "Usage: %s prDiff <github-pr-url> [--no-comments]\n", commandName)
+		return fmt.Errorf("expected at least 1 argument, got %d", ctx.NArgs())
+	}
+
+	ref := strings.TrimSpace(ctx.Arg(0))
+	if ref == "" {
+		return fmt.Errorf("pull request URL cannot be empty")
+	}
+
+	includeComments := true
+	for i := 1; i < ctx.NArgs(); i++ {
+		arg := strings.TrimSpace(ctx.Arg(i))
+		if arg == "--no-comments" {
+			includeComments = false
+		}
+	}
+
+	owner, repo, prNumber, err := parsePullRequestRef(ref)
+	if err != nil {
+		return err
+	}
+
+	if _, err := exec.LookPath("gh"); err != nil {
+		return fmt.Errorf("gh CLI not found in PATH: %w", err)
+	}
+
+	repoFull := fmt.Sprintf("%s/%s", owner, repo)
+	prRef := fmt.Sprintf("%d", prNumber)
+
+	var out bytes.Buffer
+
+	out.WriteString(fmt.Sprintf("# Pull Request: %s#%d\n\n", repoFull, prNumber))
+
+	viewCmd := exec.Command("gh", "pr", "view", prRef, "--repo", repoFull, "--json", "title,body,author,state,baseRefName,headRefName,additions,deletions,changedFiles")
+	viewOutput, err := viewCmd.Output()
+	if err != nil {
+		return fmt.Errorf("gh pr view: %w", err)
+	}
+
+	var prInfo struct {
+		Title        string `json:"title"`
+		Body         string `json:"body"`
+		Author       struct{ Login string } `json:"author"`
+		State        string `json:"state"`
+		BaseRefName  string `json:"baseRefName"`
+		HeadRefName  string `json:"headRefName"`
+		Additions    int    `json:"additions"`
+		Deletions    int    `json:"deletions"`
+		ChangedFiles int    `json:"changedFiles"`
+	}
+
+	if err := json.Unmarshal(viewOutput, &prInfo); err != nil {
+		return fmt.Errorf("parse pr info: %w", err)
+	}
+
+	out.WriteString(fmt.Sprintf("## %s\n\n", prInfo.Title))
+	out.WriteString(fmt.Sprintf("**Author:** %s\n", prInfo.Author.Login))
+	out.WriteString(fmt.Sprintf("**State:** %s\n", prInfo.State))
+	out.WriteString(fmt.Sprintf("**Base:** %s ← **Head:** %s\n", prInfo.BaseRefName, prInfo.HeadRefName))
+	out.WriteString(fmt.Sprintf("**Stats:** +%d -%d across %d files\n\n", prInfo.Additions, prInfo.Deletions, prInfo.ChangedFiles))
+
+	if prInfo.Body != "" {
+		out.WriteString("## Description\n\n")
+		out.WriteString(prInfo.Body)
+		out.WriteString("\n\n")
+	}
+
+	if includeComments {
+		commentsCmd := exec.Command("gh", "pr", "view", prRef, "--repo", repoFull, "--json", "comments")
+		commentsOutput, err := commentsCmd.Output()
+		if err == nil {
+			var commentsInfo struct {
+				Comments []struct {
+					Author struct{ Login string } `json:"author"`
+					Body   string                 `json:"body"`
+				} `json:"comments"`
+			}
+			if err := json.Unmarshal(commentsOutput, &commentsInfo); err == nil && len(commentsInfo.Comments) > 0 {
+				out.WriteString("## Comments\n\n")
+				for i, c := range commentsInfo.Comments {
+					out.WriteString(fmt.Sprintf("### Comment %d by %s\n\n", i+1, c.Author.Login))
+					out.WriteString(c.Body)
+					out.WriteString("\n\n")
+				}
+			}
+		}
+
+		reviewsCmd := exec.Command("gh", "pr", "view", prRef, "--repo", repoFull, "--json", "reviews")
+		reviewsOutput, err := reviewsCmd.Output()
+		if err == nil {
+			var reviewsInfo struct {
+				Reviews []struct {
+					Author struct{ Login string } `json:"author"`
+					Body   string                 `json:"body"`
+					State  string                 `json:"state"`
+				} `json:"reviews"`
+			}
+			if err := json.Unmarshal(reviewsOutput, &reviewsInfo); err == nil && len(reviewsInfo.Reviews) > 0 {
+				out.WriteString("## Reviews\n\n")
+				for i, r := range reviewsInfo.Reviews {
+					if r.Body == "" {
+						continue
+					}
+					out.WriteString(fmt.Sprintf("### Review %d by %s (%s)\n\n", i+1, r.Author.Login, r.State))
+					out.WriteString(r.Body)
+					out.WriteString("\n\n")
+				}
+			}
+		}
+	}
+
+	out.WriteString("## Diff\n\n")
+	out.WriteString("```diff\n")
+
+	diffCmd := exec.Command("gh", "pr", "diff", prRef, "--repo", repoFull)
+	diffOutput, err := diffCmd.Output()
+	if err != nil {
+		return fmt.Errorf("gh pr diff: %w", err)
+	}
+
+	out.Write(diffOutput)
+	out.WriteString("```\n")
+
+	fmt.Fprint(ctx.Stdout(), out.String())
 	return nil
 }
 
