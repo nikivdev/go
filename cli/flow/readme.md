@@ -25,7 +25,7 @@ Available Commands:
   tasks            List Taskfile tasks with descriptions
   try              Create a numbered scratch directory in ~/t and open a shell there
   privateForkRepo  Clone a repo and create a private fork with upstream remotes
-  privateForkRepoAndOpen Clone a repo, create a private fork, and open it in Cursor
+  privateForkRepoAndOpen Clone a repo, create a private fork, and open it in Zed
   listWindowsOfApp  List visible windows for a running macOS app
   shExec           Fuzzy-search shell scripts under ~/config/sh and execute them
   gitFetchUpstream Fetch from upstream (or all remotes) with pruning

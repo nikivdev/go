@@ -362,7 +362,7 @@ func main() {
 		return runPrivateForkRepo(ctx)
 	})
 
-	registerCommand(app, "privateForkRepoAndOpen", "Private fork a repo and open it in Cursor", func(ctx *snap.Context) error {
+	registerCommand(app, "privateForkRepoAndOpen", "Private fork a repo and open it in Zed", func(ctx *snap.Context) error {
 		return runPrivateForkRepoAndOpen(ctx)
 	})
 
@@ -805,7 +805,7 @@ func printRootHelp(out io.Writer) {
 	fmt.Fprintln(out, "  tasks            List Taskfile tasks with descriptions")
 	fmt.Fprintln(out, "  try              Create a numbered scratch directory in ~/t and open a shell there")
 	fmt.Fprintln(out, "  privateForkRepo  Clone a repo and create a private fork with upstream remotes")
-	fmt.Fprintln(out, "  privateForkRepoAndOpen Clone a repo, create a private fork, and open it in Cursor")
+	fmt.Fprintln(out, "  privateForkRepoAndOpen Clone a repo, create a private fork, and open it in Zed")
 	fmt.Fprintln(out, "  listWindowsOfApp  List visible windows for a running macOS app")
 	fmt.Fprintln(out, "  shExec           Fuzzy-search shell scripts under ~/config/sh and execute them")
 	fmt.Fprintln(out, "  gitFetchUpstream Fetch from upstream (or all remotes) with pruning")
@@ -1452,6 +1452,23 @@ func openInCursor(ctx *snap.Context, path string) error {
 	cmd.Stdin = ctx.Stdin()
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("open Cursor: %w", err)
+	}
+
+	return nil
+}
+
+func openInZed(ctx *snap.Context, path string) error {
+	zedApp := "/Applications/Zed.app"
+	if _, err := os.Stat(zedApp); err != nil {
+		return fmt.Errorf("Zed.app not found at %s: %w", zedApp, err)
+	}
+
+	cmd := exec.Command("open", "-a", zedApp, path)
+	cmd.Stdout = ctx.Stdout()
+	cmd.Stderr = ctx.Stderr()
+	cmd.Stdin = ctx.Stdin()
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("open Zed: %w", err)
 	}
 
 	return nil
@@ -3059,10 +3076,10 @@ func privateForkRepoFlow(ctx *snap.Context, commandLabel string, openAfter bool)
 		if info.IsDir() {
 			if openAfter {
 				fmt.Fprintf(ctx.Stdout(), "ℹ️ Destination %s already exists; skipping clone.\n", targetDir)
-				if err := openInCursor(ctx, targetDir); err != nil {
-					return reportError(ctx, fmt.Errorf("open repository in Cursor: %w", err))
+				if err := openInZed(ctx, targetDir); err != nil {
+					return reportError(ctx, fmt.Errorf("open repository in Zed: %w", err))
 				}
-				fmt.Fprintf(ctx.Stdout(), "✔️ Opened %s in Cursor\n", targetDir)
+				fmt.Fprintf(ctx.Stdout(), "✔️ Opened %s in Zed\n", targetDir)
 				return nil
 			}
 			return reportError(ctx, fmt.Errorf("destination %s already exists", targetDir))
@@ -3108,10 +3125,10 @@ func privateForkRepoFlow(ctx *snap.Context, commandLabel string, openAfter bool)
 	}
 
 	if openAfter {
-		if err := openInCursor(ctx, targetDir); err != nil {
-			return reportError(ctx, fmt.Errorf("open repository in Cursor: %w", err))
+		if err := openInZed(ctx, targetDir); err != nil {
+			return reportError(ctx, fmt.Errorf("open repository in Zed: %w", err))
 		}
-		fmt.Fprintf(ctx.Stdout(), "✔️ Opened %s in Cursor\n", targetDir)
+		fmt.Fprintf(ctx.Stdout(), "✔️ Opened %s in Zed\n", targetDir)
 	}
 
 	fmt.Fprintln(ctx.Stdout(), "flow.toml ready with pull/setup-fork tasks to sync your fork.")
