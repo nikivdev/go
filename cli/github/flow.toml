@@ -1,0 +1,10 @@
+version = 1
+
+[[tasks]]
+name = "deploy"
+description = "Build and install ghx to ~/bin"
+command = '''
+set -euo pipefail
+go build -o ~/bin/ghx .
+echo "Installed: ~/bin/ghx"
+'''
