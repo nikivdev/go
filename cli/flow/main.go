@@ -346,6 +346,10 @@ func main() {
 		return runSpotifyCurrentPlayingSongCopy(ctx)
 	})
 
+	registerCommand(app, "spotifyCurrentPlayingSongUrlCopy", "Copy currently playing Spotify track URL to clipboard", func(ctx *snap.Context) error {
+		return runSpotifyCurrentPlayingSongUrlCopy(ctx)
+	})
+
 	registerCommand(app, "tasks", "List Taskfile tasks with descriptions", func(ctx *snap.Context) error {
 		return runTasks(ctx)
 	})
@@ -4280,6 +4284,42 @@ end tell`
 	}
 
 	fmt.Fprintln(ctx.Stdout(), song)
+	return nil
+}
+
+func runSpotifyCurrentPlayingSongUrlCopy(ctx *snap.Context) error {
+	script := `tell application "Spotify"
+  if player state is playing then
+    return id of current track
+  else
+    return ""
+  end if
+end tell`
+
+	cmd := exec.Command("osascript", "-e", script)
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to get Spotify track ID: %w", err)
+	}
+
+	trackID := strings.TrimSpace(string(output))
+	if trackID == "" {
+		fmt.Fprintln(ctx.Stdout(), "No song currently playing")
+		return nil
+	}
+
+	// Spotify returns IDs like "spotify:track:1pm5qDt7Du4VJGVJ7xJQQa"
+	// Convert to URL format: https://open.spotify.com/track/1pm5qDt7Du4VJGVJ7xJQQa
+	trackID = strings.TrimPrefix(trackID, "spotify:track:")
+	trackURL := "https://open.spotify.com/track/" + trackID
+
+	pbcopy := exec.Command("pbcopy")
+	pbcopy.Stdin = strings.NewReader(trackURL)
+	if err := pbcopy.Run(); err != nil {
+		return fmt.Errorf("failed to copy to clipboard: %w", err)
+	}
+
+	fmt.Fprintln(ctx.Stdout(), trackURL)
 	return nil
 }
 
