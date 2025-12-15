@@ -1,0 +1,10 @@
+version = 1
+
+[[tasks]]
+name = "deploy"
+description = "Build and install unite to ~/bin"
+command = '''
+set -euo pipefail
+go build -o ~/bin/unite .
+echo "Installed: ~/bin/unite"
+'''
