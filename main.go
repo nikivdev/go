@@ -19,6 +19,9 @@ import (
 	"time"
 
 	"github.com/dzonerzy/go-snap/snap"
+	"github.com/gomarkdown/markdown"
+	"github.com/gomarkdown/markdown/html"
+	"github.com/gomarkdown/markdown/parser"
 	"github.com/ktr0731/go-fuzzyfinder"
 )
 
@@ -27,6 +30,8 @@ const (
 	flowVersion           = "1.0.0"
 	symlinkCandidateLimit = 8000
 )
+
+var buildTime = "unknown"
 
 var (
 	errSymlinkSelectionAborted = errors.New("symlink selection aborted")
@@ -380,7 +385,53 @@ func main() {
 
 	app.Command("version", "Reports the current version of flow").
 		Action(func(ctx *snap.Context) error {
-			fmt.Fprintln(ctx.Stdout(), flowVersion)
+			fmt.Fprintf(ctx.Stdout(), "%s (built %s)\n", flowVersion, buildTime)
+			return nil
+		})
+
+	app.Command("openMd", "Convert a markdown file to HTML and open it in the browser").
+		Action(func(ctx *snap.Context) error {
+			fmt.Fprintln(ctx.Stdout(), "openMd: starting")
+			if ctx.NArgs() != 1 {
+				fmt.Fprintf(ctx.Stderr(), "Usage: %s openMd <path-to-file.md>\n", flowName)
+				return fmt.Errorf("expected 1 argument, got %d", ctx.NArgs())
+			}
+
+			mdPath := strings.TrimSpace(ctx.Arg(0))
+			fmt.Fprintf(ctx.Stdout(), "openMd: mdPath=%s\n", mdPath)
+			if mdPath == "" {
+				fmt.Fprintf(ctx.Stderr(), "Usage: %s openMd <path-to-file.md>\n", flowName)
+				return fmt.Errorf("file path cannot be empty")
+			}
+
+			if !strings.HasSuffix(mdPath, ".md") {
+				mdPath = mdPath + ".md"
+			}
+
+			mdContent, err := os.ReadFile(mdPath)
+			if err != nil {
+				return fmt.Errorf("read %s: %w", mdPath, err)
+			}
+
+			htmlContent := mdToHTML(mdContent)
+
+			baseName := filepath.Base(mdPath)
+			htmlName := strings.TrimSuffix(baseName, ".md") + ".html"
+			htmlPath := filepath.Join(os.TempDir(), htmlName)
+
+			if err := os.WriteFile(htmlPath, htmlContent, 0o644); err != nil {
+				return fmt.Errorf("write %s: %w", htmlPath, err)
+			}
+
+			fmt.Fprintf(ctx.Stdout(), "Opening %s\n", htmlPath)
+
+			openCmd := exec.Command("open", htmlPath)
+			openCmd.Stdout = ctx.Stdout()
+			openCmd.Stderr = ctx.Stderr()
+			if err := openCmd.Run(); err != nil {
+				return fmt.Errorf("open %s: %w", htmlPath, err)
+			}
+
 			return nil
 		})
 
@@ -406,7 +457,7 @@ func handleTopLevel(args []string, out io.Writer) bool {
 		printRootHelp(out)
 		return true
 	case "--version":
-		fmt.Fprintln(out, flowVersion)
+		fmt.Fprintf(out, "%s (built %s)\n", flowVersion, buildTime)
 		return true
 	case "help":
 		if len(args) == 1 {
@@ -498,6 +549,14 @@ func printCommandHelp(name string, out io.Writer) bool {
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, "Lists: repo (default), expanded, selection, files")
 		return true
+	case "openMd":
+		fmt.Fprintln(out, "Convert a markdown file to HTML and open it in the browser")
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Usage:")
+		fmt.Fprintf(out, "  %s openMd <path-to-file>\n", flowName)
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "The .md extension is added automatically if not provided.")
+		return true
 	}
 
 	return false
@@ -520,6 +579,7 @@ func printRootHelp(out io.Writer) {
 	fmt.Fprintln(out, "  updateGoVersion  Upgrade Go using the workspace script")
 	fmt.Fprintln(out, "  tasks            List Taskfile tasks with descriptions")
 	fmt.Fprintln(out, "  workspacePaths   List/add/remove path lists inside RepoPrompt workspace.json")
+	fmt.Fprintln(out, "  openMd           Convert a markdown file to HTML and open in browser")
 	fmt.Fprintln(out, "  version          Reports the current version of flow")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Flags:")
@@ -1175,4 +1235,16 @@ func parseNumericCandidate(raw string) (int, bool) {
 		return 0, false
 	}
 	return number, true
+}
+
+func mdToHTML(md []byte) []byte {
+	extensions := parser.CommonExtensions | parser.AutoHeadingIDs | parser.NoEmptyLineBeforeBlock
+	p := parser.NewWithExtensions(extensions)
+	doc := p.Parse(md)
+
+	htmlFlags := html.CommonFlags | html.HrefTargetBlank | html.CompletePage
+	opts := html.RendererOptions{Flags: htmlFlags}
+	renderer := html.NewRenderer(opts)
+
+	return markdown.Render(doc, renderer)
 }
