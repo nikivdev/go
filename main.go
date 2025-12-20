@@ -31,7 +31,7 @@ const (
 	symlinkCandidateLimit = 8000
 )
 
-var buildTime = "unknown"
+var buildTimestamp = "0"
 
 var (
 	errSymlinkSelectionAborted = errors.New("symlink selection aborted")
@@ -385,20 +385,91 @@ func main() {
 
 	app.Command("version", "Reports the current version of flow").
 		Action(func(ctx *snap.Context) error {
-			fmt.Fprintf(ctx.Stdout(), "%s (built %s)\n", flowVersion, buildTime)
+			fmt.Fprintf(ctx.Stdout(), "%s (built %s)\n", flowVersion, formatBuildAge())
 			return nil
+		})
+
+	app.Command("privateForkRepoAndOpen", "Clone a public repo into ~/fork-i, set up remotes, and open in Zed").
+		Action(func(ctx *snap.Context) error {
+			if ctx.NArgs() > 1 {
+				fmt.Fprintf(ctx.Stderr(), "Usage: %s privateForkRepoAndOpen [github-repo-url]\n", flowName)
+				return fmt.Errorf("expected at most 1 argument, got %d", ctx.NArgs())
+			}
+
+			var input string
+			if ctx.NArgs() == 1 {
+				input = strings.TrimSpace(ctx.Arg(0))
+			}
+			if input == "" {
+				return fmt.Errorf("github repository url cannot be empty")
+			}
+
+			owner, repo, cloneURL, err := parseGitHubCloneInfo(input)
+			if err != nil {
+				return fmt.Errorf("parse GitHub repository: %w", err)
+			}
+
+			login, err := currentGitHubLogin()
+			if err != nil {
+				return fmt.Errorf("determine GitHub login: %w", err)
+			}
+
+			homeDir, err := os.UserHomeDir()
+			if err != nil {
+				return fmt.Errorf("determine home directory: %w", err)
+			}
+
+			targetDir := filepath.Join(homeDir, "fork-i", owner, repo)
+			if info, err := os.Stat(targetDir); err == nil && info.IsDir() {
+				fmt.Fprintf(ctx.Stdout(), "Destination %s already exists; opening.\n", targetDir)
+				return openInZed(ctx, targetDir)
+			}
+
+			if err := os.MkdirAll(filepath.Dir(targetDir), 0o755); err != nil {
+				return fmt.Errorf("create directory: %w", err)
+			}
+
+			fmt.Fprintf(ctx.Stdout(), "Cloning %s into %s\n", cloneURL, targetDir)
+			cloneCmd := exec.Command("git", "clone", cloneURL, targetDir)
+			cloneCmd.Stdout = ctx.Stdout()
+			cloneCmd.Stderr = ctx.Stderr()
+			if err := cloneCmd.Run(); err != nil {
+				return fmt.Errorf("git clone: %w", err)
+			}
+
+			renameCmd := exec.Command("git", "remote", "rename", "origin", "upstream")
+			renameCmd.Dir = targetDir
+			if err := renameCmd.Run(); err != nil {
+				return fmt.Errorf("rename origin to upstream: %w", err)
+			}
+
+			privateRepoName := repo
+			if !strings.HasSuffix(privateRepoName, "-i") {
+				privateRepoName += "-i"
+			}
+			privateSSH := fmt.Sprintf("git@github.com:%s/%s.git", login, privateRepoName)
+
+			addCmd := exec.Command("git", "remote", "add", "origin", privateSSH)
+			addCmd.Dir = targetDir
+			if err := addCmd.Run(); err != nil {
+				return fmt.Errorf("add origin remote: %w", err)
+			}
+
+			fmt.Fprintf(ctx.Stdout(), "Local copy: %s\n", targetDir)
+			fmt.Fprintf(ctx.Stdout(), "origin -> %s\n", privateSSH)
+			fmt.Fprintf(ctx.Stdout(), "upstream -> %s\n", cloneURL)
+
+			return openInZed(ctx, targetDir)
 		})
 
 	app.Command("openMd", "Convert a markdown file to HTML and open it in the browser").
 		Action(func(ctx *snap.Context) error {
-			fmt.Fprintln(ctx.Stdout(), "openMd: starting")
 			if ctx.NArgs() != 1 {
 				fmt.Fprintf(ctx.Stderr(), "Usage: %s openMd <path-to-file.md>\n", flowName)
 				return fmt.Errorf("expected 1 argument, got %d", ctx.NArgs())
 			}
 
 			mdPath := strings.TrimSpace(ctx.Arg(0))
-			fmt.Fprintf(ctx.Stdout(), "openMd: mdPath=%s\n", mdPath)
 			if mdPath == "" {
 				fmt.Fprintf(ctx.Stderr(), "Usage: %s openMd <path-to-file.md>\n", flowName)
 				return fmt.Errorf("file path cannot be empty")
@@ -422,8 +493,6 @@ func main() {
 			if err := os.WriteFile(htmlPath, htmlContent, 0o644); err != nil {
 				return fmt.Errorf("write %s: %w", htmlPath, err)
 			}
-
-			fmt.Fprintf(ctx.Stdout(), "Opening %s\n", htmlPath)
 
 			openCmd := exec.Command("open", htmlPath)
 			openCmd.Stdout = ctx.Stdout()
@@ -457,7 +526,7 @@ func handleTopLevel(args []string, out io.Writer) bool {
 		printRootHelp(out)
 		return true
 	case "--version":
-		fmt.Fprintf(out, "%s (built %s)\n", flowVersion, buildTime)
+		fmt.Fprintf(out, "%s (built %s)\n", flowVersion, formatBuildAge())
 		return true
 	case "help":
 		if len(args) == 1 {
@@ -557,6 +626,12 @@ func printCommandHelp(name string, out io.Writer) bool {
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, "The .md extension is added automatically if not provided.")
 		return true
+	case "privateForkRepoAndOpen":
+		fmt.Fprintln(out, "Clone a public repo into ~/fork-i, set up remotes, and open in Zed")
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Usage:")
+		fmt.Fprintf(out, "  %s privateForkRepoAndOpen <github-repo-url>\n", flowName)
+		return true
 	}
 
 	return false
@@ -580,6 +655,7 @@ func printRootHelp(out io.Writer) {
 	fmt.Fprintln(out, "  tasks            List Taskfile tasks with descriptions")
 	fmt.Fprintln(out, "  workspacePaths   List/add/remove path lists inside RepoPrompt workspace.json")
 	fmt.Fprintln(out, "  openMd           Convert a markdown file to HTML and open in browser")
+	fmt.Fprintln(out, "  privateForkRepoAndOpen  Clone public repo to ~/fork-i and open in Zed")
 	fmt.Fprintln(out, "  version          Reports the current version of flow")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Flags:")
@@ -1247,4 +1323,126 @@ func mdToHTML(md []byte) []byte {
 	renderer := html.NewRenderer(opts)
 
 	return markdown.Render(doc, renderer)
+}
+
+func formatBuildAge() string {
+	ts, err := strconv.ParseInt(buildTimestamp, 10, 64)
+	if err != nil || ts == 0 {
+		return "unknown"
+	}
+
+	buildTime := time.Unix(ts, 0)
+	elapsed := time.Since(buildTime)
+
+	switch {
+	case elapsed < time.Minute:
+		secs := int(elapsed.Seconds())
+		if secs == 1 {
+			return "1 second ago"
+		}
+		return fmt.Sprintf("%d seconds ago", secs)
+	case elapsed < time.Hour:
+		mins := int(elapsed.Minutes())
+		if mins == 1 {
+			return "1 minute ago"
+		}
+		return fmt.Sprintf("%d minutes ago", mins)
+	case elapsed < 24*time.Hour:
+		hours := int(elapsed.Hours())
+		if hours == 1 {
+			return "1 hour ago"
+		}
+		return fmt.Sprintf("%d hours ago", hours)
+	default:
+		days := int(elapsed.Hours() / 24)
+		if days == 1 {
+			return "1 day ago"
+		}
+		return fmt.Sprintf("%d days ago", days)
+	}
+}
+
+func parseGitHubCloneInfo(input string) (string, string, string, error) {
+	switch {
+	case strings.HasPrefix(input, "git@"):
+		if !strings.HasPrefix(input, "git@github.com:") {
+			return "", "", "", fmt.Errorf("unsupported git host in %q", input)
+		}
+		path := strings.TrimPrefix(input, "git@github.com:")
+		owner, repo, err := splitOwnerRepo(path)
+		if err != nil {
+			return "", "", "", err
+		}
+		return owner, repo, input, nil
+	case strings.HasPrefix(input, "http://") || strings.HasPrefix(input, "https://"):
+		u, err := url.Parse(input)
+		if err != nil {
+			return "", "", "", fmt.Errorf("parse url %q: %w", input, err)
+		}
+		if !strings.EqualFold(u.Host, "github.com") {
+			return "", "", "", fmt.Errorf("expected github.com host, got %s", u.Host)
+		}
+		owner, repo, err := splitOwnerRepo(u.Path)
+		if err != nil {
+			return "", "", "", err
+		}
+		cloneURL := fmt.Sprintf("https://github.com/%s/%s", owner, repo)
+		return owner, repo, cloneURL, nil
+	default:
+		owner, repo, err := splitOwnerRepo(input)
+		if err != nil {
+			return "", "", "", err
+		}
+		cloneURL := fmt.Sprintf("https://github.com/%s/%s", owner, repo)
+		return owner, repo, cloneURL, nil
+	}
+}
+
+func splitOwnerRepo(path string) (string, string, error) {
+	trimmed := strings.Trim(path, "/")
+	if trimmed == "" {
+		return "", "", fmt.Errorf("invalid GitHub repository path: %q", path)
+	}
+	parts := strings.Split(trimmed, "/")
+	if len(parts) < 2 {
+		return "", "", fmt.Errorf("invalid GitHub repository path: %q", path)
+	}
+	owner := parts[0]
+	repo := strings.TrimSuffix(parts[1], ".git")
+	if owner == "" || repo == "" {
+		return "", "", fmt.Errorf("invalid GitHub repository path: %q", path)
+	}
+	return owner, repo, nil
+}
+
+func currentGitHubLogin() (string, error) {
+	if _, err := exec.LookPath("gh"); err != nil {
+		return "", fmt.Errorf("gh CLI not found in PATH: %w", err)
+	}
+
+	cmd := exec.Command("gh", "api", "user", "--jq", ".login")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		trimmed := strings.TrimSpace(string(output))
+		if trimmed != "" {
+			return "", fmt.Errorf("gh api user: %s", trimmed)
+		}
+		return "", fmt.Errorf("gh api user: %w", err)
+	}
+
+	login := strings.TrimSpace(string(output))
+	if login == "" {
+		return "", fmt.Errorf("gh api user returned empty login")
+	}
+	return login, nil
+}
+
+func openInZed(ctx *snap.Context, path string) error {
+	cmd := exec.Command("open", "-a", "Zed", path)
+	cmd.Stdout = ctx.Stdout()
+	cmd.Stderr = ctx.Stderr()
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("open Zed: %w", err)
+	}
+	return nil
 }
