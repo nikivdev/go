@@ -22,10 +22,25 @@ func main() {
 		zedFocusFromWarp()
 	case "version":
 		fmt.Println(version)
+	case "-h", "--help", "help":
+		printHelp()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
 		os.Exit(1)
 	}
+}
+
+func printHelp() {
+	fmt.Println(`flow - workflow automation commands
+
+Commands:
+  zed-focus-from-warp   Activate Zed window matching clipboard folder name
+                        (switch, focus, get, list windows)
+  version               Show version
+  help                  Show this help
+
+Usage:
+  flow zed-focus-from-warp   Read clipboard for folder path, find and raise matching Zed window`)
 }
 
 // zedFocusFromWarp reads clipboard (e.g. "~/flow - fish"), extracts folder name, and activates matching Zed window
