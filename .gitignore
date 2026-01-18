@@ -32,3 +32,8 @@ private
 lang
 run.go
 cli/flow/flow
+.ai/internal/
+
+.ai/todos/*.bike
+
+.ai/review-log.jsonl
