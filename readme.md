@@ -10,7 +10,7 @@ Search through all available tasks by running `f`.
 
 ## Contributing
 
-Make issues with bugs/features or PRs. Unfinished work will be merged too if the idea is good. Software or docs can always be better. Thank you. Can see [this](https://nikiv.dev/how-i-code) for how to code fast with AI.
+[Use AI](https://nikiv.dev/how-i-code) & [flow](https://github.com/nikivdev/flow). All meaningful issues and PRs will be merged in. Thank you.
 
 ### 🖤
 
