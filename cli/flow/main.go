@@ -402,6 +402,10 @@ func main() {
 		return runGitSyncFork(ctx)
 	})
 
+	registerCommand(app, "gitMirror", "Manage a contributor mirror remote (setup/push/pull/take)", func(ctx *snap.Context) error {
+		return runGitMirror(ctx)
+	})
+
 	registerCommand(app, "youtubeToSound", "Download audio into ~/.flow/youtube-sound using yt-dlp", func(ctx *snap.Context) error {
 		return runYoutubeToSound(ctx)
 	})
@@ -715,6 +719,18 @@ func printCommandHelp(name string, out io.Writer) bool {
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, "Defaults: branch=current (or origin/HEAD), strategy=rebase, remote=upstream.")
 		return true
+	case "gitMirror":
+		fmt.Fprintln(out, "Manage a contributor mirror remote without changing Flow core behavior")
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Usage:")
+		fmt.Fprintf(out, "  %s gitMirror setup --remote <name> --url <git-url>\n", commandName)
+		fmt.Fprintf(out, "  %s gitMirror push [--remote <name>] [--branch <name>]\n", commandName)
+		fmt.Fprintf(out, "  %s gitMirror pull [--remote <name>] [--branch <name>] [--strategy rebase|merge|ff-only]\n", commandName)
+		fmt.Fprintf(out, "  %s gitMirror take [--remote <name>] [--branch <name>]\n", commandName)
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "setup stores the default mirror remote in local git config key fgo.collabRemote.")
+		fmt.Fprintln(out, "take performs `git merge --squash --no-commit <remote>/<branch>` so you can commit as yourself.")
+		return true
 	case "youtubeToSound":
 		fmt.Fprintln(out, "Download audio from a YouTube URL into ~/.flow/youtube-sound using yt-dlp")
 		fmt.Fprintln(out)
@@ -814,6 +830,7 @@ func printRootHelp(out io.Writer) {
 	fmt.Fprintln(out, "  shExec           Fuzzy-search shell scripts under ~/config/sh and execute them")
 	fmt.Fprintln(out, "  gitFetchUpstream Fetch from upstream (or all remotes) with pruning")
 	fmt.Fprintln(out, "  gitSyncFork      Update a local branch from upstream using rebase or merge")
+	fmt.Fprintln(out, "  gitMirror        Mirror-remote workflow (setup/push/pull/take) for contributor repos")
 	fmt.Fprintln(out, "  updateGoVersion  Upgrade Go using the workspace script")
 	fmt.Fprintln(out, "  youtubeToSound   Download audio from a YouTube URL into ~/.flow/youtube-sound using yt-dlp")
 	fmt.Fprintln(out, "  spotifyPlay      Start playing a Spotify track from a URL or ID")
@@ -1195,15 +1212,15 @@ func runPRDiff(ctx *snap.Context) error {
 	}
 
 	var prInfo struct {
-		Title        string `json:"title"`
-		Body         string `json:"body"`
+		Title        string                 `json:"title"`
+		Body         string                 `json:"body"`
 		Author       struct{ Login string } `json:"author"`
-		State        string `json:"state"`
-		BaseRefName  string `json:"baseRefName"`
-		HeadRefName  string `json:"headRefName"`
-		Additions    int    `json:"additions"`
-		Deletions    int    `json:"deletions"`
-		ChangedFiles int    `json:"changedFiles"`
+		State        string                 `json:"state"`
+		BaseRefName  string                 `json:"baseRefName"`
+		HeadRefName  string                 `json:"headRefName"`
+		Additions    int                    `json:"additions"`
+		Deletions    int                    `json:"deletions"`
+		ChangedFiles int                    `json:"changedFiles"`
 	}
 
 	if err := json.Unmarshal(viewOutput, &prInfo); err != nil {
@@ -3472,8 +3489,8 @@ func runGitDiffSize(ctx *snap.Context) error {
 	fmt.Fprintln(ctx.Stdout(), "")
 
 	const (
-		warnThreshold = 100000   // 100KB (~25k tokens)
-		bigThreshold  = 1000000  // 1MB (~250k tokens)
+		warnThreshold = 100000  // 100KB (~25k tokens)
+		bigThreshold  = 1000000 // 1MB (~250k tokens)
 	)
 
 	var tooBigFiles []string
@@ -3974,6 +3991,364 @@ func runGitSyncFork(ctx *snap.Context) error {
 	fmt.Fprintf(ctx.Stdout(), "✔️ %s %s with %s using %s\n", action, branch, remoteRef, strings.ToLower(strategy))
 	fmt.Fprintf(ctx.Stdout(), "Next: git push origin %s\n", branch)
 	return nil
+}
+
+type gitMirrorOptions struct {
+	remote   string
+	branch   string
+	url      string
+	strategy string
+}
+
+func runGitMirror(ctx *snap.Context) error {
+	if err := ensureGitRepository(); err != nil {
+		return err
+	}
+	if ctx.NArgs() < 1 {
+		printGitMirrorUsage(ctx.Stderr())
+		return fmt.Errorf("missing action")
+	}
+
+	action := strings.ToLower(strings.TrimSpace(ctx.Arg(0)))
+	opts, err := parseGitMirrorOptions(ctx, 1)
+	if err != nil {
+		printGitMirrorUsage(ctx.Stderr())
+		return err
+	}
+
+	switch action {
+	case "setup":
+		return runGitMirrorSetup(ctx, opts)
+	case "push":
+		return runGitMirrorPush(ctx, opts)
+	case "pull":
+		return runGitMirrorPull(ctx, opts)
+	case "take":
+		return runGitMirrorTake(ctx, opts)
+	default:
+		printGitMirrorUsage(ctx.Stderr())
+		return fmt.Errorf("unknown gitMirror action %q", action)
+	}
+}
+
+func printGitMirrorUsage(out io.Writer) {
+	fmt.Fprintf(out, "Usage: %s gitMirror setup --remote <name> --url <git-url>\n", commandName)
+	fmt.Fprintf(out, "       %s gitMirror push [--remote <name>] [--branch <name>]\n", commandName)
+	fmt.Fprintf(out, "       %s gitMirror pull [--remote <name>] [--branch <name>] [--strategy rebase|merge|ff-only]\n", commandName)
+	fmt.Fprintf(out, "       %s gitMirror take [--remote <name>] [--branch <name>]\n", commandName)
+}
+
+func parseGitMirrorOptions(ctx *snap.Context, start int) (gitMirrorOptions, error) {
+	opts := gitMirrorOptions{}
+	for i := start; i < ctx.NArgs(); i++ {
+		arg := strings.TrimSpace(ctx.Arg(i))
+		if arg == "" {
+			continue
+		}
+
+		switch {
+		case arg == "--remote":
+			i++
+			if i >= ctx.NArgs() {
+				return opts, fmt.Errorf("--remote requires a value")
+			}
+			opts.remote = strings.TrimSpace(ctx.Arg(i))
+		case strings.HasPrefix(arg, "--remote="):
+			opts.remote = strings.TrimSpace(strings.TrimPrefix(arg, "--remote="))
+		case arg == "--branch":
+			i++
+			if i >= ctx.NArgs() {
+				return opts, fmt.Errorf("--branch requires a value")
+			}
+			opts.branch = strings.TrimSpace(ctx.Arg(i))
+		case strings.HasPrefix(arg, "--branch="):
+			opts.branch = strings.TrimSpace(strings.TrimPrefix(arg, "--branch="))
+		case arg == "--url":
+			i++
+			if i >= ctx.NArgs() {
+				return opts, fmt.Errorf("--url requires a value")
+			}
+			opts.url = strings.TrimSpace(ctx.Arg(i))
+		case strings.HasPrefix(arg, "--url="):
+			opts.url = strings.TrimSpace(strings.TrimPrefix(arg, "--url="))
+		case arg == "--strategy":
+			i++
+			if i >= ctx.NArgs() {
+				return opts, fmt.Errorf("--strategy requires a value")
+			}
+			opts.strategy = strings.TrimSpace(ctx.Arg(i))
+		case strings.HasPrefix(arg, "--strategy="):
+			opts.strategy = strings.TrimSpace(strings.TrimPrefix(arg, "--strategy="))
+		case strings.HasPrefix(arg, "--"):
+			return opts, fmt.Errorf("unknown flag %q", arg)
+		default:
+			if opts.branch == "" {
+				opts.branch = arg
+				continue
+			}
+			return opts, fmt.Errorf("unexpected argument %q", arg)
+		}
+	}
+	return opts, nil
+}
+
+func runGitMirrorSetup(ctx *snap.Context, opts gitMirrorOptions) error {
+	remote := strings.TrimSpace(opts.remote)
+	url := strings.TrimSpace(opts.url)
+	if remote == "" || url == "" {
+		printGitMirrorUsage(ctx.Stderr())
+		return fmt.Errorf("setup requires --remote and --url")
+	}
+
+	exists, currentURL, err := gitRemoteState(remote)
+	if err != nil {
+		return err
+	}
+
+	if !exists {
+		if err := runGitCommandStreaming(ctx, "remote", "add", remote, url); err != nil {
+			return fmt.Errorf("git remote add %s %s: %w", remote, url, err)
+		}
+	} else if !urlsEquivalent(currentURL, url) {
+		if err := runGitCommandStreaming(ctx, "remote", "set-url", remote, url); err != nil {
+			return fmt.Errorf("git remote set-url %s %s: %w", remote, url, err)
+		}
+	}
+
+	if err := runGitCommandStreaming(ctx, "fetch", remote, "--prune"); err != nil {
+		return fmt.Errorf("git fetch %s --prune: %w", remote, err)
+	}
+	if err := setGitLocalConfig("fgo.collabRemote", remote); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(ctx.Stdout(), "✔️ Mirror remote ready: %s -> %s\n", remote, url)
+	fmt.Fprintf(ctx.Stdout(), "Stored as default in local git config key fgo.collabRemote.\n")
+	fmt.Fprintf(ctx.Stdout(), "Next: %s gitMirror push\n", commandName)
+	return nil
+}
+
+func runGitMirrorPush(ctx *snap.Context, opts gitMirrorOptions) error {
+	remote, err := resolveGitMirrorRemote(opts.remote)
+	if err != nil {
+		return err
+	}
+	branch, err := resolveGitMirrorBranch(opts.branch)
+	if err != nil {
+		return err
+	}
+
+	if err := runGitCommandStreaming(ctx, "push", "-u", remote, branch); err != nil {
+		return fmt.Errorf("git push -u %s %s: %w", remote, branch, err)
+	}
+
+	fmt.Fprintf(ctx.Stdout(), "✔️ Pushed %s to %s/%s\n", branch, remote, branch)
+	return nil
+}
+
+func runGitMirrorPull(ctx *snap.Context, opts gitMirrorOptions) error {
+	remote, err := resolveGitMirrorRemote(opts.remote)
+	if err != nil {
+		return err
+	}
+	branch, err := resolveGitMirrorBranch(opts.branch)
+	if err != nil {
+		return err
+	}
+	strategy := strings.ToLower(strings.TrimSpace(opts.strategy))
+	if strategy == "" {
+		strategy = "rebase"
+	}
+
+	remoteRef, err := fetchMirrorBranch(ctx, remote, branch)
+	if err != nil {
+		return err
+	}
+
+	localRef := fmt.Sprintf("refs/heads/%s", branch)
+	localExists, err := gitRefExists(localRef)
+	if err != nil {
+		return fmt.Errorf("check local branch %s: %w", branch, err)
+	}
+	if !localExists {
+		if err := runGitCommandStreaming(ctx, "checkout", "-b", branch, remoteRef); err != nil {
+			return fmt.Errorf("git checkout -b %s %s: %w", branch, remoteRef, err)
+		}
+		fmt.Fprintf(ctx.Stdout(), "✔️ Created local branch %s from %s\n", branch, remoteRef)
+		return nil
+	}
+
+	current, err := currentGitBranch()
+	if err != nil {
+		return err
+	}
+	if current != branch {
+		if err := runGitCommandStreaming(ctx, "checkout", branch); err != nil {
+			return fmt.Errorf("git checkout %s: %w", branch, err)
+		}
+	}
+
+	switch strategy {
+	case "rebase":
+		if err := runGitCommandStreaming(ctx, "rebase", remoteRef); err != nil {
+			return fmt.Errorf("git rebase %s: %w", remoteRef, err)
+		}
+	case "merge":
+		if err := runGitCommandStreaming(ctx, "merge", "--no-ff", remoteRef); err != nil {
+			return fmt.Errorf("git merge --no-ff %s: %w", remoteRef, err)
+		}
+	case "ff-only":
+		if err := runGitCommandStreaming(ctx, "merge", "--ff-only", remoteRef); err != nil {
+			return fmt.Errorf("git merge --ff-only %s: %w", remoteRef, err)
+		}
+	default:
+		printGitMirrorUsage(ctx.Stderr())
+		return fmt.Errorf("unsupported --strategy %q", strategy)
+	}
+
+	fmt.Fprintf(ctx.Stdout(), "✔️ Synced %s from %s using %s\n", branch, remoteRef, strategy)
+	return nil
+}
+
+func runGitMirrorTake(ctx *snap.Context, opts gitMirrorOptions) error {
+	dirty, err := gitWorkingTreeDirty()
+	if err != nil {
+		return err
+	}
+	if dirty {
+		return fmt.Errorf("working tree is not clean; commit/stash changes before gitMirror take")
+	}
+
+	remote, err := resolveGitMirrorRemote(opts.remote)
+	if err != nil {
+		return err
+	}
+
+	currentBranch, err := currentGitBranch()
+	if err != nil {
+		return err
+	}
+	if currentBranch == "" || currentBranch == "HEAD" {
+		return fmt.Errorf("detached HEAD; checkout a destination branch first")
+	}
+
+	sourceBranch := strings.TrimSpace(opts.branch)
+	if sourceBranch == "" {
+		sourceBranch = currentBranch
+	}
+
+	remoteRef, err := fetchMirrorBranch(ctx, remote, sourceBranch)
+	if err != nil {
+		return err
+	}
+
+	if err := runGitCommandStreaming(ctx, "merge", "--squash", "--no-commit", remoteRef); err != nil {
+		return fmt.Errorf("git merge --squash --no-commit %s: %w", remoteRef, err)
+	}
+
+	fmt.Fprintf(ctx.Stdout(), "✔️ Staged squashed changes from %s into %s\n", remoteRef, currentBranch)
+	fmt.Fprintf(ctx.Stdout(), "Next: f commit\n")
+	return nil
+}
+
+func resolveGitMirrorRemote(override string) (string, error) {
+	remote := strings.TrimSpace(override)
+	if remote == "" {
+		configured, err := getGitLocalConfig("fgo.collabRemote")
+		if err != nil {
+			return "", err
+		}
+		remote = strings.TrimSpace(configured)
+	}
+	if remote == "" {
+		if exists, _, err := gitRemoteState("myflow-i"); err == nil && exists {
+			remote = "myflow-i"
+		}
+	}
+	if remote == "" {
+		return "", fmt.Errorf("mirror remote not configured; run `%s gitMirror setup --remote myflow-i --url <git-url>`", commandName)
+	}
+
+	exists, _, err := gitRemoteState(remote)
+	if err != nil {
+		return "", err
+	}
+	if !exists {
+		return "", fmt.Errorf("git remote %q not found", remote)
+	}
+	return remote, nil
+}
+
+func resolveGitMirrorBranch(override string) (string, error) {
+	branch := strings.TrimSpace(override)
+	if branch != "" {
+		return branch, nil
+	}
+
+	current, err := currentGitBranch()
+	if err != nil {
+		return "", err
+	}
+	current = strings.TrimSpace(current)
+	if current == "" || current == "HEAD" {
+		return "", fmt.Errorf("detached HEAD; pass --branch explicitly")
+	}
+	return current, nil
+}
+
+func fetchMirrorBranch(ctx *snap.Context, remote, branch string) (string, error) {
+	if err := runGitCommandStreaming(ctx, "fetch", remote, "--prune"); err != nil {
+		return "", fmt.Errorf("git fetch %s --prune: %w", remote, err)
+	}
+
+	remoteRefName := fmt.Sprintf("refs/remotes/%s/%s", remote, branch)
+	exists, err := gitRefExists(remoteRefName)
+	if err != nil {
+		return "", fmt.Errorf("check remote branch %s: %w", remoteRefName, err)
+	}
+	if !exists {
+		return "", fmt.Errorf("remote branch %s/%s not found", remote, branch)
+	}
+
+	return fmt.Sprintf("%s/%s", remote, branch), nil
+}
+
+func getGitLocalConfig(key string) (string, error) {
+	cmd := exec.Command("git", "config", "--local", "--get", key)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return "", nil
+		}
+		trimmed := strings.TrimSpace(string(out))
+		if trimmed != "" {
+			return "", fmt.Errorf("git config --local --get %s: %s", key, trimmed)
+		}
+		return "", fmt.Errorf("git config --local --get %s: %w", key, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func setGitLocalConfig(key, value string) error {
+	cmd := exec.Command("git", "config", "--local", key, value)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		trimmed := strings.TrimSpace(string(out))
+		if trimmed != "" {
+			return fmt.Errorf("git config --local %s %s: %s", key, value, trimmed)
+		}
+		return fmt.Errorf("git config --local %s %s: %w", key, value, err)
+	}
+	return nil
+}
+
+func gitWorkingTreeDirty() (bool, error) {
+	out, err := exec.Command("git", "status", "--porcelain").Output()
+	if err != nil {
+		return false, fmt.Errorf("git status --porcelain: %w", err)
+	}
+	return strings.TrimSpace(string(out)) != "", nil
 }
 
 func runGitCheckout(ctx *snap.Context) error {

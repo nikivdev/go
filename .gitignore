@@ -38,3 +38,11 @@ cli/flow/flow
 .ai/todos/*.bike
 
 .ai/review-log.jsonl
+
+# flow
+.ai/internal/
+.ai/web/
+.ai/skills/
+.claude/
+.codex/
+.flox/

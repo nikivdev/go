@@ -30,6 +30,7 @@ Available Commands:
   shExec           Fuzzy-search shell scripts under ~/config/sh and execute them
   gitFetchUpstream Fetch from upstream (or all remotes) with pruning
   gitSyncFork      Update a local branch from upstream using rebase or merge
+  gitMirror        Mirror-remote workflow for contributor repos (setup/push/pull/take)
   updateGoVersion  Upgrade Go using the workspace script
   youtubeToSound   Download audio from a YouTube URL into ~/.flow/youtube-sound using yt-dlp
   spotifyPlay      Start playing a Spotify track from a URL or ID

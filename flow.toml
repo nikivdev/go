@@ -14,6 +14,9 @@ Available tasks:
 - flow [args...]      Build a temp fgo binary and run it with forwarded args.
 - dev [args...]       Alias for flow.
 - run [args...]       Alias for flow.
+- spec [args...]      Build a temp spec binary and run it (copies prompt to clipboard by default).
+- spec-print <file>   Generate prompt to stdout without touching clipboard.
+- spec-deploy         Build/install spec to ~/bin/spec.
 - deploy [name]       Build/install to ~/bin. Default: fgo (with fe alias). Use "fm" for moonbit.
 EOF
 '''
@@ -38,6 +41,11 @@ mkdir -p "$GOCACHE"
 mkdir -p "$GOMODCACHE"
 if ! go mod download >/dev/null; then
   echo "Warning: unable to download Go modules; try again once network access is available."
+fi
+popd >/dev/null
+pushd cli/spec >/dev/null
+if ! go mod download >/dev/null; then
+  echo "Warning: unable to download spec CLI Go modules; try again once network access is available."
 fi
 popd >/dev/null
 echo "✔️ you are setup"
@@ -101,6 +109,75 @@ mkdir -p "$GOMODCACHE"
 go build -o "$tmp_dir/fgo" .
 popd >/dev/null
 "$tmp_dir/fgo" "$@"
+'''
+
+[[tasks]]
+name = "spec"
+description = "Run the spec CLI (passes CLI args through)."
+dependencies = ["go"]
+command = '''
+set -euo pipefail
+repo_root="$PWD"
+tmp_root="${TMPDIR:-/tmp}"
+tmp_dir="$(mktemp -d "$tmp_root/spec-task-XXXXXX")"
+trap 'rm -rf "$tmp_dir"' EXIT
+pushd cli/spec >/dev/null
+export GOCACHE="${GOCACHE:-$repo_root/.gocache}"
+export GOMODCACHE="${GOMODCACHE:-$repo_root/.gomodcache}"
+mkdir -p "$GOCACHE"
+mkdir -p "$GOMODCACHE"
+go build -o "$tmp_dir/spec" .
+popd >/dev/null
+"$tmp_dir/spec" "$@"
+'''
+
+[[tasks]]
+name = "spec-print"
+description = "Generate a prompt from a markdown spec and print to stdout."
+dependencies = ["go"]
+command = '''
+set -euo pipefail
+if [ "$#" -lt 1 ]; then
+  echo "Usage: f spec-print <path-to-spec.md>"
+  exit 1
+fi
+repo_root="$PWD"
+tmp_root="${TMPDIR:-/tmp}"
+tmp_dir="$(mktemp -d "$tmp_root/spec-task-XXXXXX")"
+trap 'rm -rf "$tmp_dir"' EXIT
+pushd cli/spec >/dev/null
+export GOCACHE="${GOCACHE:-$repo_root/.gocache}"
+export GOMODCACHE="${GOMODCACHE:-$repo_root/.gomodcache}"
+mkdir -p "$GOCACHE"
+mkdir -p "$GOMODCACHE"
+go build -o "$tmp_dir/spec" .
+popd >/dev/null
+"$tmp_dir/spec" "$@" --stdout --no-clipboard
+'''
+
+[[tasks]]
+name = "spec-deploy"
+description = "Build the spec CLI and install it to ~/bin/spec."
+dependencies = ["go"]
+command = '''
+set -euo pipefail
+repo_root="$PWD"
+install_dir="$HOME/bin"
+mkdir -p "$install_dir"
+pushd cli/spec >/dev/null
+export GOCACHE="${GOCACHE:-$repo_root/.gocache}"
+export GOMODCACHE="${GOMODCACHE:-$repo_root/.gomodcache}"
+mkdir -p "$GOCACHE"
+mkdir -p "$GOMODCACHE"
+tmp_root="${TMPDIR:-/tmp}"
+tmp_dir="$(mktemp -d "$tmp_root/spec-install-XXXXXX")"
+trap 'rm -rf "$tmp_dir"' EXIT
+go build -o "$tmp_dir/spec" .
+popd >/dev/null
+install_path="$install_dir/spec"
+mv "$tmp_dir/spec" "$install_path"
+chmod 755 "$install_path"
+echo "Installed CLI to $install_path"
 '''
 
 [[tasks]]
